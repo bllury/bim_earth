@@ -2,8 +2,12 @@
 import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import * as Cesium from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
-import { pickIfcFeature } from '../lib/ifcPicking'
+import { pickIfcFeatures } from '../lib/ifcPicking'
 import type { PickedIfcFeature } from '../lib/ifcPicking'
+import {
+  hiddenElementKeys,
+  ifcTilesetModelIds,
+} from '../features/viewer/selectionState'
 
 const props = defineProps<{
   selectedPosition: Cesium.Cartesian3 | null
@@ -112,9 +116,23 @@ onMounted(() => {
 
   const handler = new Cesium.ScreenSpaceEventHandler(currentViewer.scene.canvas)
   handler.setInputAction((event: { position: Cesium.Cartesian2 }) => {
-    const ifcFeature = pickIfcFeature(currentViewer, event.position)
-    if (ifcFeature) {
-      emit('ifcFeaturePicked', ifcFeature)
+    const ifcFeatures = pickIfcFeatures(currentViewer, event.position)
+    const pickableFeature = ifcFeatures.find((feature) => {
+      const modelId = ifcTilesetModelIds.get(feature.tileset)
+      return Boolean(
+        modelId &&
+          feature.ifcGuid &&
+          !hiddenElementKeys.value.has(`${modelId}:${feature.ifcGuid}`),
+      )
+    })
+
+    if (pickableFeature) {
+      emit('ifcFeaturePicked', pickableFeature)
+      return
+    }
+
+    if (ifcFeatures.length > 0) {
+      emit('ifcFeaturePicked', null)
       return
     }
 

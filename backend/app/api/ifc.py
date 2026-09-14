@@ -134,6 +134,14 @@ def create_ifc_router(
             camera=store.get_camera(revision["project_id"]),
         )
 
+    @router.delete("/revisions/{revision_id}")
+    async def delete_revision(revision_id: str) -> dict[str, str]:
+        revision = store.delete_revision(revision_id)
+        if not revision:
+            raise HTTPException(status_code=404, detail="模型版本不存在")
+        service.cancel(revision_id)
+        return {"status": "deleted", "revisionId": revision_id}
+
     @router.put("/projects/{project_id}/camera")
     async def save_camera(project_id: str, payload: CameraState) -> dict[str, str]:
         if payload.projectId != project_id:

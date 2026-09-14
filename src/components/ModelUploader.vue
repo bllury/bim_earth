@@ -14,6 +14,7 @@ import {
   fetchIfcElementProperties,
   fetchIfcMetadata,
   fetchRecentIfcModel,
+  deleteIfcRevision,
   resolveIfcAssetUrl,
   saveIfcCamera,
   type CameraState,
@@ -30,6 +31,7 @@ import {
   type LoadedIfcModelState,
   type UploadedModelState,
 } from '../features/viewer/useBimModelState'
+import { hiddenElementKeys } from '../features/viewer/selectionState'
 import type { PickedIfcFeature } from '../lib/ifcPicking'
 import type {
   BimAnnotation,
@@ -40,6 +42,8 @@ import type {
 import IfcInspectorPanel from './IfcInspectorPanel.vue'
 import BimComponentTree from './BimComponentTree.vue'
 import SelectionInfoPanel from './SelectionInfoPanel.vue'
+
+const RECENT_RESTORE_KEY = 'bim-earth-allow-recent-restore'
 
 const props = defineProps<{
   viewer: Cesium.Viewer | null
@@ -127,6 +131,7 @@ const readFlightDistanceMultiplier = () => {
 }
 const flightDistanceMultiplier = ref(readFlightDistanceMultiplier())
 const multiUnselectedOpacity = ref(0.1)
+const hiddenTreeKeys = ref<Set<string>>(new Set())
 const isolatedTreeKey = ref<string | null>(null)
 
 const featureOriginalColors = new Map<string, Cesium.Color>()
@@ -138,6 +143,22 @@ let flashingOn = false
 
 const annotations = ref<BimAnnotation[]>([])
 const businessByElement = ref<Record<string, Record<string, unknown>>>({})
+
+const readRecentRestoreEnabled = () => {
+  try {
+    return localStorage.getItem(RECENT_RESTORE_KEY) !== 'false'
+  } catch {
+    return true
+  }
+}
+
+const setRecentRestoreEnabled = (enabled: boolean) => {
+  try {
+    localStorage.setItem(RECENT_RESTORE_KEY, String(enabled))
+  } catch {
+    // Storage may be unavailable; persistence of this flag is best-effort.
+  }
+}
 
 interface SelectionGuideItem {
   key: string
@@ -191,6 +212,18 @@ const saveBusinessData = () => {
     'bim-earth-business',
     JSON.stringify(businessByElement.value),
   )
+}
+
+/** Removes local annotations and business fields belonging to a deleted model. */
+const removeLocalModelData = (modelId: string) => {
+  annotations.value = annotations.value.filter((item) => item.modelId !== modelId)
+  Object.keys(businessByElement.value).forEach((key) => {
+    if (key.startsWith(`${modelId}:`)) {
+      delete businessByElement.value[key]
+    }
+  })
+  saveAnnotations()
+  saveBusinessData()
 }
 
 loadAnnotations()
@@ -687,9 +720,18 @@ const flyToIfcModel = (model: LoadedIfcModelState) => {
 }
 
 /** Removes an IFC model and all associated selection state. */
-const removeIfcModel = (modelId: string) => {
+const removeIfcModel = async (modelId: string) => {
   const model = ifcModels.value.find((item) => item.modelId === modelId)
   const taskId = ifcModelTaskIds.get(modelId)
+  if (taskId) {
+    try {
+      await deleteIfcRevision(taskId)
+    } catch (error) {
+      console.error('IFC 持久化模型删除失败:', error)
+      return
+    }
+  }
+  setRecentRestoreEnabled(false)
   removedIfcModelIds.add(modelId)
   removeTileset(props.viewer, modelId)
   loadingIfcModelIds.delete(modelId)
@@ -723,6 +765,12 @@ const removeIfcModel = (modelId: string) => {
     featureOriginalColors.delete(key)
   })
   clearTreeSelection()
+  hiddenElementKeys.value = new Set(
+    [...hiddenElementKeys.value].filter((key) => !key.startsWith(`${modelId}:`)),
+  )
+  hiddenTreeKeys.value = new Set(
+    [...hiddenTreeKeys.value].filter((key) => !key.startsWith(`model:${modelId}`)),
+  )
   coordinateInputs.value = { ...coordinateInputs.value }
   delete coordinateInputs.value[modelId]
   scaleDrafts.value = { ...scaleDrafts.value }
@@ -732,6 +780,7 @@ const removeIfcModel = (modelId: string) => {
   if (selectedModelId.value === modelId) {
     selectedModelId.value = null
   }
+  removeLocalModelData(modelId)
   if (props.viewer) {
     const handler = cameraChangeHandlers.get(modelId)
     if (handler) {
@@ -992,6 +1041,7 @@ const loadIfcTileset = async (
   ifcModelTaskIds.set(loadedModelId, taskId)
   registerCameraPersistence(loadedModelId, projectId)
   loadingIfcModelIds.delete(loadedModelId)
+  setRecentRestoreEnabled(true)
   ifcModels.value = [
     ...ifcModels.value,
     {
@@ -1047,7 +1097,13 @@ const {
 
 /** Restores the latest completed IFC revision after the viewer becomes ready. */
 const restoreRecentIfcModel = async () => {
-  if (recentModelRestoreStarted.value || !props.viewer) return
+  if (
+    recentModelRestoreStarted.value ||
+    !props.viewer ||
+    !readRecentRestoreEnabled()
+  ) {
+    return
+  }
   recentModelRestoreStarted.value = true
   try {
     const recent = await fetchRecentIfcModel()
@@ -1077,14 +1133,21 @@ watch(
 )
 
 /** Stops polling and removes a conversion task from the task list. */
-const removeIfcTask = (taskId: string) => {
-stopIfcConversion(taskId)
-ifcTasks.value = ifcTasks.value.filter((task) => task.taskId !== taskId)
-for (const [modelId, mappedTaskId] of ifcModelTaskIds) {
-  if (mappedTaskId === taskId) {
-    ifcModelTaskIds.delete(modelId)
+const removeIfcTask = async (taskId: string) => {
+  stopIfcConversion(taskId)
+  try {
+    await deleteIfcRevision(taskId)
+  } catch (error) {
+    console.error('IFC task delete failed', error)
+    return
   }
-}
+  setRecentRestoreEnabled(false)
+  ifcTasks.value = ifcTasks.value.filter((task) => task.taskId !== taskId)
+  for (const [modelId, mappedTaskId] of ifcModelTaskIds) {
+    if (mappedTaskId === taskId) {
+      ifcModelTaskIds.delete(modelId)
+    }
+  }
 }
 
 /** Builds the hierarchical component tree from IFC semantic metadata. */
@@ -1304,7 +1367,7 @@ const getWorldPositionForElement = (
     const original = featureOriginalColors.get(key)
     if (original) {
       try {
-        feature.color = original
+        feature.color = getRestoredFeatureColor(key, original)
       } catch {
         // Feature 可能已随 tileset 销毁。
       }
@@ -1327,7 +1390,7 @@ const startFlashing = (features: Cesium.Cesium3DTileFeature[]) => {
   stopFlashing()
   features.forEach((feature) => {
     const key = getFeatureKey(feature)
-    if (!key) return
+    if (!key || hiddenElementKeys.value.has(key)) return
     if (!featureOriginalColors.has(key)) {
       featureOriginalColors.set(key, feature.color.clone())
     }
@@ -1341,12 +1404,16 @@ const startFlashing = (features: Cesium.Cesium3DTileFeature[]) => {
     flashingFeatures.forEach((feature, key) => {
       const original = featureOriginalColors.get(key)
       if (!original) return
-      feature.color =
-        flashingOn && key === activeGuideFeatureKey.value
-          ? Cesium.Color.fromCssColorString('#123b75')
-          : flashingOn
-            ? Cesium.Color.YELLOW
-            : original.withAlpha(1)
+      if (hiddenElementKeys.value.has(key)) {
+        feature.color = getRestoredFeatureColor(key, original)
+      } else {
+        feature.color =
+          flashingOn && key === activeGuideFeatureKey.value
+            ? Cesium.Color.fromCssColorString('#123b75')
+            : flashingOn
+              ? Cesium.Color.YELLOW
+              : original
+      }
     })
   }, 500)
 }
@@ -1422,18 +1489,100 @@ const getFeaturesForModel = (
   return features
 }
 
+/** Applies hierarchy visibility without letting selection restore hidden features. */
+const getRestoredFeatureColor = (key: string, original: Cesium.Color) => {
+  if (!hiddenElementKeys.value.has(key)) return original
+  return original.withAlpha(multiUnselectedOpacity.value)
+}
+
 /** Restores every registered feature to its original appearance. */
 const restoreAllFeatureVisuals = () => {
   featureRegistry.forEach((feature, key) => {
     const original = featureOriginalColors.get(key)
     if (original) {
       try {
-        feature.color = original
+        feature.color = getRestoredFeatureColor(key, original)
       } catch {
         // Feature 可能已随 tileset 销毁。
       }
+
+        /** Toggles visibility for every element below a hierarchy node. */
+        const toggleTreeVisibility = (node: BimTreeNode) => {
+          const elementKeys: string[] = []
+          const hierarchyKeys: string[] = []
+          const collect = (current: BimTreeNode) => {
+            hierarchyKeys.push(current.id)
+            if (current.type === 'element' && current.ifcGuid) {
+              elementKeys.push(`${current.modelId}:${current.ifcGuid}`)
+              return
+            }
+            current.children?.forEach(collect)
+          }
+          collect(node)
+          if (!elementKeys.length) return
+
+          const nextHidden = new Set(hiddenElementKeys.value)
+          const shouldHide = elementKeys.some((key) => !nextHidden.has(key))
+          elementKeys.forEach((key) => {
+            if (shouldHide) nextHidden.add(key)
+            else nextHidden.delete(key)
+          })
+          hiddenElementKeys.value = nextHidden
+
+          const nextTreeHidden = new Set(hiddenTreeKeys.value)
+          hierarchyKeys.forEach((key) => {
+            if (shouldHide) nextTreeHidden.add(key)
+            else nextTreeHidden.delete(key)
+          })
+          hiddenTreeKeys.value = nextTreeHidden
+          applyCurrentTreeVisualState()
+        }
     }
   })
+}
+
+/** Collects all element keys below a hierarchy node. */
+const collectElementKeys = (node: BimTreeNode): string[] => {
+  const keys: string[] = []
+  const collect = (current: BimTreeNode) => {
+    if (current.type === 'element' && current.ifcGuid) {
+      keys.push(`${current.modelId}:${current.ifcGuid}`)
+      return
+    }
+
+    current.children?.forEach(collect)
+  }
+
+  collect(node)
+  return keys
+}
+
+/** Returns true when every descendant element of a hierarchy node is checked. */
+const isTreeNodeChecked = (node: BimTreeNode) => {
+  const elementKeys = collectElementKeys(node)
+  return (
+    elementKeys.length > 0 &&
+    elementKeys.every((key) => !hiddenElementKeys.value.has(key))
+  )
+}
+
+/** Toggles a hierarchy node or single element and applies that state to descendants. */
+const toggleTreeVisibility = (node: BimTreeNode) => {
+  const elementKeys = collectElementKeys(node)
+  if (elementKeys.length === 0) return
+
+  const shouldShow = !isTreeNodeChecked(node)
+  const nextHidden = new Set(hiddenElementKeys.value)
+  elementKeys.forEach((key) => {
+    if (shouldShow) {
+      nextHidden.delete(key)
+    } else {
+      nextHidden.add(key)
+    }
+  })
+
+  hiddenElementKeys.value = nextHidden
+  applyCurrentTreeVisualState()
 }
 
 /** Flies to one IFC element using its metadata-derived bounding sphere. */
@@ -1495,26 +1644,40 @@ const flyToIfcFeature = (feature: Cesium.Cesium3DTileFeature, modelId: string) =
   })
 }
 
-/** Applies the current single or multi-selection opacity state. */
-const applyCurrentTreeVisualState = () => {
-  if (treeSelectionMode.value === 'single' && isolatedTreeKey.value) {
-    featureRegistry.forEach((feature, key) => {
-      const original = featureOriginalColors.get(key)
-      if (!original) return
-      feature.color =
-        key === isolatedTreeKey.value
-          ? original
-          : original.withAlpha(multiUnselectedOpacity.value)
-    })
+/** Applies opacity to non-selected features while keeping the single selection visible. */
+const applySingleSelectionVisualState = () => {
+  const selectedKey = selectedTreeKey.value
+  if (!selectedKey) {
+    restoreAllFeatureVisuals()
     return
   }
 
-  if (treeSelectionMode.value === 'multi' && multiSelectedKeys.value.size > 0) {
+  ifcModels.value.forEach((model) => {
+    getFeaturesForModel(model.modelId).forEach((feature) => {
+      const ifcGuid = feature.getProperty('ifcGuid') as string | undefined
+      if (!ifcGuid) return
+
+      const key = `${model.modelId}:${ifcGuid}`
+      const original = featureOriginalColors.get(key) ?? feature.color.clone()
+      featureOriginalColors.set(key, original)
+
+      if (key === selectedKey && !hiddenElementKeys.value.has(key)) {
+        feature.color = original
+      } else {
+        feature.color = original.withAlpha(multiUnselectedOpacity.value)
+      }
+    })
+  })
+}
+
+/** Applies the current single or multi-selection opacity state. */
+const applyCurrentTreeVisualState = () => {
+  if (treeSelectionMode.value === 'multi') {
     applyMultiVisualState()
     return
   }
 
-  restoreAllFeatureVisuals()
+  applySingleSelectionVisualState()
 }
 
 /** Selects one component-tree element and opens its information panel. */
@@ -1535,7 +1698,9 @@ const applyTreeSelection = async (node: BimTreeNode) => {
   if (feature) {
     stopFlashing()
     applyCurrentTreeVisualState()
-    startFlashing([feature])
+    if (!hiddenElementKeys.value.has(key)) {
+      startFlashing([feature])
+    }
     flyToIfcFeature(feature, node.modelId)
   } else {
     console.warn('构件几何当前尚未加载')
@@ -1652,7 +1817,7 @@ const applyMultiVisualState = () => {
       const isSelected = multiSelectedKeys.value.has(key)
       const original = featureOriginalColors.get(key) ?? feature.color.clone()
       featureOriginalColors.set(key, original)
-      if (isSelected) {
+      if (isSelected && !hiddenElementKeys.value.has(key)) {
         selectedFeatures.push(feature)
       } else {
         feature.color = original.withAlpha(multiUnselectedOpacity.value)
@@ -1683,7 +1848,7 @@ const setTreeSelectionMode = (mode: 'single' | 'multi') => {
 
 /** Updates the opacity of non-selected components in multi-select mode. */
 const setMultiUnselectedOpacity = (value: number) => {
-  multiUnselectedOpacity.value = value
+  multiUnselectedOpacity.value = Math.min(Math.max(value, 0), 1)
   applyCurrentTreeVisualState()
 }
 
@@ -1694,7 +1859,10 @@ const clearIfcHighlight = () => {
 
   if (highlight.feature && highlight.originalColor) {
     try {
-      highlight.feature.color = highlight.originalColor
+      const key = getFeatureKey(highlight.feature)
+      highlight.feature.color = key
+        ? getRestoredFeatureColor(key, highlight.originalColor)
+        : highlight.originalColor
     } catch {
       // Feature 可能已随 tileset 销毁。
     }
@@ -1711,6 +1879,7 @@ const applyIfcHighlight = (feature: PickedIfcFeature) => {
 
   clearIfcHighlight()
   const key = getFeatureKey(feature.feature)
+  if (key && hiddenElementKeys.value.has(key)) return
   const storedColor = key ? featureOriginalColors.get(key) : undefined
   activeIfcHighlight.value = {
     feature: feature.feature,
@@ -2387,6 +2556,7 @@ const removeModel = (modelId: string) => {
   if (selectedModelId.value === modelId) {
     selectedModelId.value = null
   }
+  removeLocalModelData(modelId)
 }
 
 /** Starts dragging the model-management panel. */
@@ -2743,11 +2913,13 @@ onBeforeUnmount(() => {
       :selected-key="selectedTreeKey"
       :multi-selected-keys="multiSelectedKeys"
       :unselected-opacity="multiUnselectedOpacity"
+      :hidden-keys="hiddenElementKeys"
       @select-element="applyTreeSelection"
       @toggle-multi-element="toggleTreeMultiSelection"
       @clear-selection="clearTreeSelection"
       @set-mode="setTreeSelectionMode"
       @set-opacity="setMultiUnselectedOpacity"
+      @toggle-visibility="toggleTreeVisibility"
     />
   </div>
 
