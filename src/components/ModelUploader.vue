@@ -1281,7 +1281,7 @@ const getWorldPositionForElement = (
   ): SelectionGuideItem => {
     const metadata = ifcGeometryByKey.get(`${modelId}:${ifcGuid}`)
     const metadataElement = ifcMetadataByKey.get(`${modelId}:${ifcGuid}`)
-    const worldPosition = feature.worldPosition ?? getWorldPositionForElement(modelId, ifcGuid)
+    const worldPosition = getWorldPositionForElement(modelId, ifcGuid) ?? feature.worldPosition
     const nextFeature = worldPosition === feature.worldPosition
       ? feature
       : { ...feature, worldPosition }

@@ -2,14 +2,17 @@
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import * as Cesium from 'cesium'
 import type { PickedIfcFeature } from '../lib/ifcPicking'
+import type { IfcElementGeometry } from '../services/ifcApi'
 
 interface SelectionItem {
   key: string
+  modelId: string
   ifcGuid: string
   expressId?: string | number
   name: string
   elementType: string
   storey?: string
+  geometry?: IfcElementGeometry
   feature: PickedIfcFeature
 }
 
@@ -35,7 +38,20 @@ const activeItem = () => props.items[props.activeIndex]
 /** Reprojects the selected element and connects it to the panel edge. */
 const updateGuideLine = () => {
   const viewer = props.viewer
-  const position = activeItem()?.feature.worldPosition
+  const item = activeItem()
+  const geometryPosition =
+    item?.geometry && item.feature.tileset
+      ? Cesium.Matrix4.multiplyByPoint(
+          item.feature.tileset.modelMatrix,
+          new Cesium.Cartesian3(
+            item.geometry.center.x,
+            item.geometry.center.y,
+            item.geometry.center.z,
+          ),
+          new Cesium.Cartesian3(),
+        )
+      : undefined
+  const position = geometryPosition ?? item?.feature.worldPosition
   if (!viewer || !position) {
     line.value = { ...line.value, visible: false }
     return
