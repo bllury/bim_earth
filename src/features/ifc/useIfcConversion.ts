@@ -80,6 +80,7 @@ export const useIfcConversion = (
     pollingTasks.add(taskId)
     try {
       const result = await fetchIfcConversionStatus(taskId)
+      if (terminalTasks.has(taskId)) return
       if (result.status === 'completed') {
         stop(taskId)
         updateTask(taskId, { status: 'completed', message: result.message })
@@ -125,6 +126,7 @@ export const useIfcConversion = (
         }, 2000),
       )
     } catch (error) {
+      if (terminalTasks.has(taskId)) return
       stop(taskId)
       updateTask(taskId, {
         status: 'failed',

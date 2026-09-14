@@ -8,6 +8,7 @@ const props = defineProps<{
   selectedKey: string | null
   multiSelectedKeys: Set<string>
   unselectedOpacity: number
+  hiddenKeys: Set<string>
 }>()
 
 const emit = defineEmits<{
@@ -16,6 +17,7 @@ const emit = defineEmits<{
   clearSelection: []
   setMode: [mode: 'single' | 'multi']
   setOpacity: [value: number]
+  toggleVisibility: [node: BimTreeNode]
 }>()
 
 const expanded = ref<Set<string>>(new Set())
@@ -31,7 +33,46 @@ const toggleExpanded = (id: string) => {
   } else {
     next.add(id)
   }
+
   expanded.value = next
+}
+
+const collectElementKeys = (node: BimTreeNode): string[] => {
+  const keys: string[] = []
+  const collect = (current: BimTreeNode) => {
+    if (current.type === 'element' && current.ifcGuid) {
+      keys.push(`${current.modelId}:${current.ifcGuid}`)
+      return
+    }
+
+    current.children?.forEach(collect)
+  }
+
+  collect(node)
+  return keys
+}
+
+const isElementChecked = (node: BimTreeNode) => {
+  if (!node.ifcGuid) return false
+  return !props.hiddenKeys.has(`${node.modelId}:${node.ifcGuid}`)
+}
+
+const isNodeChecked = (node: BimTreeNode) => {
+  const elementKeys = collectElementKeys(node)
+  return (
+    elementKeys.length > 0 &&
+    elementKeys.every((key) => !props.hiddenKeys.has(key))
+  )
+}
+
+const isNodeIndeterminate = (node: BimTreeNode) => {
+  const elementKeys = collectElementKeys(node)
+  const hiddenCount = elementKeys.filter((key) => props.hiddenKeys.has(key)).length
+  return hiddenCount > 0 && hiddenCount < elementKeys.length
+}
+
+const hasElementDescendants = (node: BimTreeNode) => {
+  return collectElementKeys(node).length > 0
 }
 
 const isSelected = (node: BimTreeNode) => {
@@ -47,6 +88,7 @@ const onNodeClick = (node: BimTreeNode) => {
     if (node.children?.length) {
       toggleExpanded(node.id)
     }
+
     return
   }
 
@@ -96,77 +138,50 @@ onBeforeUnmount(stopDrag)
         {{ collapsed ? '展开' : '收起' }}
       </button>
     </div>
-    <template v-if="!collapsed">
-    <div class="tree-toolbar" @pointerdown.stop>
-      <div class="mode-switch">
-        <button :class="{ active: selectionMode === 'single' }" @click="emit('setMode', 'single')">
-          单选隔离
-        </button>
-        <button :class="{ active: selectionMode === 'multi' }" @click="emit('setMode', 'multi')">
-          多选
-        </button>
-      </div>
-      <button @click="emit('clearSelection')">清空选择</button>
-    </div>
-
-    <div v-if="selectionMode === 'multi'" class="opacity-control">
-      <label>未选构件透明度：{{ Math.round(unselectedOpacity * 100) }}%</label>
-      <input
-        type="range"
-        min="0.1"
-        max="1"
-        step="0.05"
-        :value="unselectedOpacity"
-        @input="emit('setOpacity', parseFloat(($event.target as HTMLInputElement).value))"
-      />
-    </div>
-
-    <div class="tree-root">
-      <div v-for="root in roots" :key="root.id">
-        <div
-          class="tree-node"
-          :class="{ selectable: root.selectable, selected: isSelected(root) }"
-          @click="onNodeClick(root)"
-        >
-          <span v-if="root.children?.length" class="toggle" @click.stop="toggleExpanded(root.id)">
-            {{ expanded.has(root.id) ? '−' : '+' }}
-          </span>
-          <span v-else class="toggle-placeholder" />
-          <span class="label" :title="root.label">{{ root.label }}</span>
+    <div v-if="!collapsed" class="tree-content">
+      <div class="tree-toolbar" @pointerdown.stop>
+        <div class="mode-switch">
+          <button :class="{ active: selectionMode === 'single' }" @click="emit('setMode', 'single')">单选</button>
+          <button :class="{ active: selectionMode === 'multi' }" @click="emit('setMode', 'multi')">多选</button>
         </div>
-
-        <div v-if="expanded.has(root.id) && root.children?.length" class="children">
-          <div v-for="storey in root.children" :key="storey.id">
-            <div class="tree-node" @click="onNodeClick(storey)">
-              <span v-if="storey.children?.length" class="toggle" @click.stop="toggleExpanded(storey.id)">
-                {{ expanded.has(storey.id) ? '−' : '+' }}
-              </span>
-              <span v-else class="toggle-placeholder" />
-              <span class="label" :title="storey.label">{{ storey.label }}</span>
-            </div>
-
-            <div v-if="expanded.has(storey.id) && storey.children?.length" class="children">
-              <div v-for="category in storey.children" :key="category.id">
-                <div class="tree-node" @click="onNodeClick(category)">
-                  <span v-if="category.children?.length" class="toggle" @click.stop="toggleExpanded(category.id)">
-                    {{ expanded.has(category.id) ? '−' : '+' }}
-                  </span>
-                  <span v-else class="toggle-placeholder" />
-                  <span class="label" :title="category.label">{{ category.label }}</span>
-                </div>
-
-                <div v-if="expanded.has(category.id) && category.children?.length" class="children">
-                  <div
-                    v-for="element in category.children"
-                    :key="element.id"
-                    class="tree-node leaf"
-                    :class="{ selected: isSelected(element) }"
-                    :title="element.label"
-                    @click="onNodeClick(element)"
-                  >
-                    <span class="toggle-placeholder" />
-                    <span class="label">{{ element.label }}</span>
-                    <span class="element-type">{{ element.label === element.ifcGuid ? '' : element.type }}</span>
+        <button @click="emit('clearSelection')">清空选择</button>
+      </div>
+      <div class="opacity-control">
+        <label>未选构件透明度：{{ Math.round(unselectedOpacity * 100) }}%</label>
+        <input type="range" min="0" max="1" step="0.05" :value="unselectedOpacity" @input="emit('setOpacity', parseFloat(($event.target as HTMLInputElement).value))" />
+      </div>
+      <div class="tree-root">
+        <div v-if="!roots.length" class="tree-empty">IFC 构件树暂无数据，请等待模型元数据加载完成</div>
+        <div v-for="root in roots" :key="root.id">
+          <div class="tree-node" :class="{ selectable: root.selectable, selected: isSelected(root) }" @click="onNodeClick(root)">
+            <input type="checkbox" :checked="isNodeChecked(root)" :indeterminate="isNodeIndeterminate(root)" :disabled="!hasElementDescendants(root)" @click.stop @change="emit('toggleVisibility', root)" />
+            <span v-if="root.children?.length" class="toggle" @click.stop="toggleExpanded(root.id)">{{ expanded.has(root.id) ? '−' : '+' }}</span>
+            <span v-else class="toggle-placeholder" />
+            <span class="label" :title="root.label">{{ root.label }}</span>
+          </div>
+          <div v-if="expanded.has(root.id) && root.children?.length" class="children">
+            <div v-for="storey in root.children" :key="storey.id">
+              <div class="tree-node" @click="onNodeClick(storey)">
+                <input type="checkbox" :checked="isNodeChecked(storey)" :indeterminate="isNodeIndeterminate(storey)" :disabled="!hasElementDescendants(storey)" @click.stop @change="emit('toggleVisibility', storey)" />
+                <span v-if="storey.children?.length" class="toggle" @click.stop="toggleExpanded(storey.id)">{{ expanded.has(storey.id) ? '−' : '+' }}</span>
+                <span v-else class="toggle-placeholder" />
+                <span class="label" :title="storey.label">{{ storey.label }}</span>
+              </div>
+              <div v-if="expanded.has(storey.id) && storey.children?.length" class="children">
+                <div v-for="category in storey.children" :key="category.id">
+                  <div class="tree-node" @click="onNodeClick(category)">
+                    <input type="checkbox" :checked="isNodeChecked(category)" :indeterminate="isNodeIndeterminate(category)" :disabled="!hasElementDescendants(category)" @click.stop @change="emit('toggleVisibility', category)" />
+                    <span v-if="category.children?.length" class="toggle" @click.stop="toggleExpanded(category.id)">{{ expanded.has(category.id) ? '−' : '+' }}</span>
+                    <span v-else class="toggle-placeholder" />
+                    <span class="label" :title="category.label">{{ category.label }}</span>
+                  </div>
+                  <div v-if="expanded.has(category.id) && category.children?.length" class="children">
+                    <div v-for="element in category.children" :key="element.id" class="tree-node leaf" :class="{ selected: isSelected(element) }" :title="element.label" @click="onNodeClick(element)">
+                      <input type="checkbox" :checked="isElementChecked(element)" @click.stop @change="emit('toggleVisibility', element)" />
+                      <span class="toggle-placeholder" />
+                      <span class="label">{{ element.label }}</span>
+                      <span class="element-type">{{ element.label === element.ifcGuid ? '' : element.type }}</span>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -175,7 +190,6 @@ onBeforeUnmount(stopDrag)
         </div>
       </div>
     </div>
-    </template>
   </div>
 </template>
 
@@ -187,6 +201,7 @@ onBeforeUnmount(stopDrag)
   max-height: 70vh;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
   background: white;
   border-radius: 8px;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
@@ -195,6 +210,14 @@ onBeforeUnmount(stopDrag)
 .component-tree.collapsed {
   width: auto;
   max-height: none;
+}
+
+.tree-content {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .tree-header {
@@ -251,8 +274,17 @@ button.active {
 }
 
 .tree-root {
+  min-height: 0;
+  flex: 1;
   overflow-y: auto;
   padding: 8px;
+}
+
+.tree-empty {
+  padding: 18px 8px;
+  color: #777;
+  font-size: 12px;
+  text-align: center;
 }
 
 .children {
@@ -266,6 +298,11 @@ button.active {
   padding: 3px 4px;
   border-radius: 3px;
   cursor: default;
+}
+
+.tree-node input[type='checkbox'] {
+  flex: 0 0 auto;
+  margin: 0 2px 0 0;
 }
 
 .tree-node.selectable,

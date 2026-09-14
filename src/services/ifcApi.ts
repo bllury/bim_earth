@@ -191,3 +191,13 @@ export const saveIfcCamera = async (
     throw new Error(`Cesium 相机保存失败（${response.status}）`)
   }
 }
+
+export const deleteIfcRevision = async (revisionId: string): Promise<void> => {
+  const response = await fetch(
+    `${IFC_API_BASE}/ifc/revisions/${encodeURIComponent(revisionId)}`,
+    { method: 'DELETE' },
+  )
+  if (!response.ok) {
+    throw new Error(`IFC 模型删除失败（${response.status}）`)
+  }
+}

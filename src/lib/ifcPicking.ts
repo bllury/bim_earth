@@ -12,16 +12,11 @@ export interface PickedIfcFeature {
   tileset: Cesium.Cesium3DTileset
 }
 
-export const pickIfcFeature = (
+const toPickedIfcFeature = (
   viewer: Cesium.Viewer,
   windowPosition: Cesium.Cartesian2,
-): PickedIfcFeature | null => {
-  const picked = viewer.scene.pick(windowPosition)
-
-  if (!(picked instanceof Cesium.Cesium3DTileFeature)) {
-    return null
-  }
-
+  picked: Cesium.Cesium3DTileFeature,
+): PickedIfcFeature => {
   const getProperty = <T,>(name: string, fallback?: T) => {
     const value = picked.getProperty(name) as T | undefined
     return value === undefined ? fallback : value
@@ -44,4 +39,31 @@ export const pickIfcFeature = (
     worldPosition: viewer.scene.pickPosition(windowPosition) ?? undefined,
     tileset: picked.tileset,
   }
+}
+
+export const pickIfcFeature = (
+  viewer: Cesium.Viewer,
+  windowPosition: Cesium.Cartesian2,
+): PickedIfcFeature | null => {
+  const picked = viewer.scene.pick(windowPosition)
+
+  if (!(picked instanceof Cesium.Cesium3DTileFeature)) {
+    return null
+  }
+
+  return toPickedIfcFeature(viewer, windowPosition, picked)
+}
+
+export const pickIfcFeatures = (
+  viewer: Cesium.Viewer,
+  windowPosition: Cesium.Cartesian2,
+): PickedIfcFeature[] => {
+  const pickedObjects = viewer.scene.drillPick(windowPosition) as unknown[]
+
+  return pickedObjects
+    .filter(
+      (object): object is Cesium.Cesium3DTileFeature =>
+        object instanceof Cesium.Cesium3DTileFeature,
+    )
+    .map((feature) => toPickedIfcFeature(viewer, windowPosition, feature))
 }

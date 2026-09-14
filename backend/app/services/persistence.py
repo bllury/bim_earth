@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -53,6 +54,7 @@ class PersistenceStore:
                     longitude REAL NOT NULL DEFAULT 0,
                     latitude REAL NOT NULL DEFAULT 0,
                     height REAL NOT NULL DEFAULT 0,
+                    deleted_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
                     FOREIGN KEY(project_id) REFERENCES projects(id)
@@ -76,6 +78,7 @@ class PersistenceStore:
                 ("longitude", "REAL NOT NULL DEFAULT 0"),
                 ("latitude", "REAL NOT NULL DEFAULT 0"),
                 ("height", "REAL NOT NULL DEFAULT 0"),
+                ("deleted_at", "TEXT"),
             ):
                 if name not in columns:
                     connection.execute(
@@ -148,7 +151,7 @@ class PersistenceStore:
                 """
                 UPDATE model_revisions
                 SET status = ?, model_id = COALESCE(?, model_id), error = ?, updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND deleted_at IS NULL
                 """,
                 (status, model_id, error, utc_now(), revision_id),
             )
@@ -174,11 +177,34 @@ class PersistenceStore:
                 FROM model_revisions r
                 JOIN projects p ON p.id = r.project_id
                 WHERE r.status = 'completed'
+                  AND r.deleted_at IS NULL
                 ORDER BY r.updated_at DESC
                 LIMIT 1
                 """
             ).fetchone()
         return dict(row) if row else None
+
+    def delete_revision(self, revision_id: str) -> Optional[dict[str, Any]]:
+        revision = self.get_revision(revision_id)
+        if not revision:
+            return None
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM camera_states WHERE project_id = ?",
+                (revision["project_id"],),
+            )
+            connection.execute(
+                """
+                UPDATE model_revisions
+                SET deleted_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (utc_now(), utc_now(), revision_id),
+            )
+        project_root = self.projects_root / revision["project_id"]
+        if project_root.exists():
+            shutil.rmtree(project_root)
+        return revision
 
     def save_camera(self, project_id: str, camera: dict[str, Any]) -> None:
         payload = json.dumps(camera, ensure_ascii=False)

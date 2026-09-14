@@ -1,4 +1,5 @@
 import * as Cesium from 'cesium'
+import { ifcTilesetModelIds } from './selectionState'
 
 export interface GlbPrimitiveRecord {
   primitive: Cesium.Model
@@ -8,7 +9,6 @@ export interface GlbPrimitiveRecord {
 export const useModelPrimitives = () => {
   const glbPrimitives = new Map<string, GlbPrimitiveRecord>()
   const ifcTilesets = new Map<string, Cesium.Cesium3DTileset>()
-  const ifcTilesetModelIds = new Map<Cesium.Cesium3DTileset, string>()
 
   /** Removes one GLB primitive and revokes its object URLs. */
   const removeGlb = (viewer: Cesium.Viewer | null, modelId: string) => {
