@@ -1,0 +1,101 @@
+# BIM IFC Converter Backend
+
+独立 IFC → 3D Tiles 转换服务。前端默认通过 Vite 将 `/api` 代理到
+`http://localhost:8000`。项目元数据使用 SQLite，模型文件使用 `data/projects/` 文件目录。
+
+## 安装
+
+```bash
+cd bim-earth/backend
+
+# 先确认 Python 位置
+py -0p
+
+# 使用 py 启动器创建虚拟环境；如果只有特定版本，可写为 py -3.12
+py -3 -m venv .venv
+
+# Windows PowerShell 激活，注意开头是 .\，不是 ..
+.\.venv\Scripts\Activate.ps1
+
+# 如果 PowerShell 提示脚本执行策略限制，先执行：
+# Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+
+python -m pip install --upgrade pip
+
+# 先安装核心依赖，用于启动服务和 mock 验证
+pip install -r requirements-core.txt
+```
+
+如果要使用真实 IfcOpenShell 转换，再安装：
+
+```bash
+pip install ifcopenshell
+```
+
+## 启动
+
+Windows PowerShell 使用 `$env:` 设置环境变量：
+
+```bash
+$env:IFC_CONVERTER_MODE = "mock"
+uvicorn app.main:app --reload --port 8000
+```
+
+## 转换模式
+
+### 真实 IFC 转换
+
+默认使用 IfcOpenShell：
+
+```bash
+$env:IFC_CONVERTER_MODE = "ifcopenshell"
+uvicorn app.main:app --reload --port 8000
+```
+
+要求已安装 `ifcopenshell`。如果未安装，服务会返回明确的失败状态，不会伪造成功。
+
+### 本地 mock 转换
+
+用于在没有 IfcOpenShell 的环境中验证 3D Tiles 加载链路：
+
+```bash
+$env:IFC_CONVERTER_MODE = "mock"
+uvicorn app.main:app --reload --port 8000
+```
+
+Mock 模式会生成一个用于测试的 3D Tiles 立方体，不代表真实 IFC 几何。
+
+## 接口摘要
+
+```text
+POST /api/ifc/convert
+GET  /api/ifc/convert/{taskId}
+GET  /api/ifc/recent
+PUT  /api/ifc/projects/{projectId}/camera
+GET  /api/ifc/revisions/{revisionId}/metadata.json
+GET  /api/ifc/revisions/{revisionId}/tiles/{asset}
+```
+
+## 代码边界
+
+- `app/main.py` 只负责应用组装、配置和路由注册。
+- `app/api/ifc.py` 负责 IFC HTTP 接口和请求响应转换。
+- `app/services/` 负责转换任务调度、IfcOpenShell/Mock 转换、SQLite 和 3D Tiles 文件生成。
+
+前端的 IFC 转换轮询位于 `src/features/ifc/useIfcConversion.ts`；Cesium 模型加载和交互仍由前端负责。本阶段不引入数据库、用户系统或新的任务队列。
+
+## 数据目录
+
+默认生成在 `backend/data/`：
+
+```text
+data/
+  bim.sqlite3
+  projects/{project_id}/revisions/{revision_id}/
+    source.ifc
+    tiles/
+    metadata.json
+  temp/
+```
+
+`bim.sqlite3` 保存项目、版本、转换状态、路径、模型位置和相机 JSON；大文件不进入数据库。上述目录属于运行时产物，不应提交到版本库。

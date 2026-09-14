@@ -1,0 +1,16 @@
+{
+  "modelId": "8c5fa25dcba8465fb426209570e1c17e",
+  "featureIdField": "featureId",
+  "features": [
+    {
+      "featureId": 0,
+      "ifcGuid": "mock-8c5fa25dcba8465fb426209570e1c17e",
+      "expressId": "0",
+      "elementType": "IfcMockElement",
+      "name": "Mock IFC Element",
+      "storey": "Mock Storey",
+      "material": "Mock Material",
+      "properties": "{}"
+    }
+  ]
+}
