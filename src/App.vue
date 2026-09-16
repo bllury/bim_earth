@@ -4,6 +4,7 @@ import * as Cesium from 'cesium'
 import EarthViewer from './components/EarthViewer.vue'
 import CoordinatePanel from './components/CoordinatePanel.vue'
 import ModelUploader from './components/ModelUploader.vue'
+import ConsolePanel from './components/ConsolePanel.vue'
 import type { PickedIfcFeature } from './lib/ifcPicking'
 
 const viewer = shallowRef<Cesium.Viewer | null>(null)
@@ -41,6 +42,7 @@ const handleIfcFeaturePicked = (feature: PickedIfcFeature | null) => {
       :position="selectedPosition"
       :picked-feature="pickedIfcFeature"
     />
+    <ConsolePanel />
   </div>
 </template>
 

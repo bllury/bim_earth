@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import * as Cesium from 'cesium'
+import { logError, logInfo, logWarn } from '../features/console/appConsole'
 
 const props = defineProps<{
   viewer: Cesium.Viewer | null
@@ -126,9 +127,10 @@ const handleSearch = async () => {
       duration: 2,
     })
 
+    logInfo(`搜索到地点：${searchText.value}`, { longitude, latitude })
     updateCoordinates(position)
   } catch (error) {
-    console.error('搜索失败:', error)
+    logError('搜索失败:', error)
     alert(error instanceof Error ? error.message : '搜索失败，请检查网络连接')
   }
 }
@@ -145,6 +147,7 @@ const handleCoordinateInput = () => {
     lat < -90 ||
     lat > 90
   ) {
+    logWarn('经纬度输入无效（经度 -180~180，纬度 -90~90）', { lon, lat })
     alert('请输入有效的经度（-180 到 180）和纬度（-90 到 90）')
     return
   }
@@ -157,125 +160,211 @@ const handleCoordinateInput = () => {
     })
   }
 
+  logInfo('按经纬度定位', { longitude: lon, latitude: lat })
   updateCoordinates(position)
 }
 </script>
 
 <template>
-  <div class="coordinate-panel">
-    <h3>📍 坐标选择</h3>
-
-    <div class="search-row">
+  <div class="coordinate-cluster">
+    <div class="search-bar">
       <input
         v-model="searchText"
+        class="search-input"
         type="text"
-        placeholder="搜索地点名称..."
+        placeholder="搜索地点名称…"
         @keydown.enter="handleSearch"
       />
-      <button @click="handleSearch">搜索</button>
+      <button class="search-button" title="搜索" @click="handleSearch">
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+          <circle
+            cx="7"
+            cy="7"
+            r="4.2"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+          />
+          <path
+            d="M10.2 10.2 13.5 13.5"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.6"
+            stroke-linecap="round"
+          />
+        </svg>
+      </button>
     </div>
 
-    <div class="manual-coordinate-row">
-      <input v-model="longitudeInput" type="number" step="any" placeholder="经度" />
-      <input v-model="latitudeInput" type="number" step="any" placeholder="纬度" />
-      <button class="manual-button" @click="handleCoordinateInput">定位</button>
-    </div>
-
-    <div v-if="coordinates" class="coordinate-info">
-      <div><strong>当前选择位置：</strong></div>
-      <div>经度: {{ coordinates.lon.toFixed(6) }}°</div>
-      <div>纬度: {{ coordinates.lat.toFixed(6) }}°</div>
-      <div>高度: {{ coordinates.height.toFixed(2) }}m</div>
-    </div>
-
-    <div class="hint">
-      📍 点击地球或搜索地点选择新模型放置位置；在模型管理中通过经纬度更新坐标微调模型。
+    <div class="coord-row">
+      <input
+        v-model="longitudeInput"
+        class="coord-input"
+        type="number"
+        step="any"
+        placeholder="经度"
+      />
+      <input
+        v-model="latitudeInput"
+        class="coord-input"
+        type="number"
+        step="any"
+        placeholder="纬度"
+      />
+      <button
+        class="compass-button"
+        title="按经纬度定位"
+        @click="handleCoordinateInput"
+      >
+        <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+          <circle
+            cx="8"
+            cy="8"
+            r="6.1"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.3"
+          />
+          <path
+            d="M10.6 5.4 9.2 9.2 5.4 10.6 6.8 6.8Z"
+            fill="currentColor"
+          />
+        </svg>
+      </button>
     </div>
   </div>
 </template>
 
 <style scoped>
-.coordinate-panel {
+.coordinate-cluster {
+  /* Light theme tokens; a dark theme only needs to override this block. */
+  --cp-bg: #ffffff;
+  --cp-fg: #24292f;
+  --cp-muted: #6e7781;
+  --cp-border: #e6e8eb;
+  --cp-accent: #1a56db;
+  --cp-accent-hover: #1545af;
+  --cp-accent-soft: #f2f7ff;
+  --cp-accent-border: #c9dcfb;
+  --cp-accent-ring: rgba(26, 86, 219, 0.12);
+  --cp-field-border: #d7dbe0;
+  --cp-placeholder: #9aa4ae;
+  --cp-shadow: 0 2px 8px rgba(15, 23, 42, 0.14);
+
   position: absolute;
   top: 20px;
-  left: 20px;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 1000;
-  background: white;
-  padding: 15px;
-  border-radius: 8px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
-  width: 280px;
-}
-
-h3 {
-  margin: 0 0 10px 0;
-}
-
-.search-row {
+  width: 420px;
   display: flex;
-  gap: 5px;
-  margin-bottom: 10px;
+  flex-direction: column;
+  gap: 8px;
+  color: var(--cp-fg);
+  font-size: 13px;
 }
 
-.search-row input {
-  flex: 1;
-  padding: 8px;
-  border: 1px solid #ddd;
-  border-radius: 4px;
-  font-size: 14px;
+.search-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
-.search-row button {
-  padding: 8px 12px;
-  background: #4caf50;
-  color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.manual-button {
-  width: 100%;
-  padding: 8px;
-  margin-bottom: 10px;
-  background: #2196f3;
-  color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-}
-
-.manual-coordinate-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr auto;
-  gap: 5px;
-  margin-bottom: 10px;
-}
-
-.manual-coordinate-row input {
+.search-input {
+  flex: 1 1 auto;
   min-width: 0;
-  padding: 8px;
-  border: 1px solid #ddd;
-  border-radius: 4px;
-  font-size: 13px;
+  height: 38px;
+  padding: 0 16px;
+  font-family: inherit;
+  font-size: 13.5px;
+  color: var(--cp-fg);
+  background: var(--cp-bg);
+  border: 1px solid var(--cp-field-border);
+  border-radius: 19px;
+  box-shadow: var(--cp-shadow);
+  outline: none;
 }
 
-.manual-coordinate-row .manual-button {
-  width: auto;
-  margin-bottom: 0;
-  padding: 8px 12px;
+.search-input::placeholder {
+  color: var(--cp-placeholder);
 }
 
-.coordinate-info {
-  padding: 10px;
-  background: #f5f5f5;
-  border-radius: 4px;
-  font-size: 13px;
+.search-input:focus {
+  border-color: var(--cp-accent-border);
+  box-shadow: 0 0 0 3px var(--cp-accent-ring);
 }
 
-.hint {
-  margin-top: 10px;
-  font-size: 12px;
-  color: #666;
+.search-button {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  color: #ffffff;
+  background: var(--cp-accent);
+  border: none;
+  border-radius: 50%;
+  box-shadow: var(--cp-shadow);
+  cursor: pointer;
+}
+
+.search-button:hover {
+  background: var(--cp-accent-hover);
+}
+
+.coord-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* Inset from both sides and 20% narrower than the search bar. */
+  width: 80%;
+  margin: 0 auto;
+}
+
+.coord-input {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  font-family: inherit;
+  font-size: 11.5px;
+  color: var(--cp-fg);
+  background: var(--cp-bg);
+  border: 1px solid var(--cp-field-border);
+  border-radius: 5px;
+  box-shadow: var(--cp-shadow);
+}
+
+.coord-input::placeholder {
+  color: var(--cp-placeholder);
+}
+
+.coord-input:focus {
+  outline: none;
+  border-color: var(--cp-accent-border);
+  box-shadow: 0 0 0 2px var(--cp-accent-ring);
+}
+
+.compass-button {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  color: var(--cp-accent);
+  background: var(--cp-bg);
+  border: 1px solid var(--cp-accent-border);
+  border-radius: 50%;
+  box-shadow: var(--cp-shadow);
+  cursor: pointer;
+}
+
+.compass-button:hover {
+  color: var(--cp-accent-hover);
+  background: var(--cp-accent-soft);
 }
 </style>

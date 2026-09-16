@@ -72,6 +72,9 @@ POST /api/ifc/convert
 GET  /api/ifc/convert/{taskId}
 GET  /api/ifc/recent
 PUT  /api/ifc/projects/{projectId}/camera
+GET  /api/ifc/models/{modelId}/elements/{ifcGuid}/properties
+GET  /api/ifc/models/{modelId}/elements/{ifcGuid}/business
+PUT  /api/ifc/models/{modelId}/elements/{ifcGuid}/business
 GET  /api/ifc/revisions/{revisionId}/metadata.json
 GET  /api/ifc/revisions/{revisionId}/tiles/{asset}
 ```
@@ -98,4 +101,4 @@ data/
   temp/
 ```
 
-`bim.sqlite3` 保存项目、版本、转换状态、路径、模型位置和相机 JSON；大文件不进入数据库。上述目录属于运行时产物，不应提交到版本库。
+`bim.sqlite3` 保存项目、版本、转换状态、路径、模型位置、相机 JSON 和构件运维字段；大文件不进入数据库。构件运维字段按 `modelId + ifcGuid` 存于 `element_business` 表，删除模型版本时一并清理。上述目录属于运行时产物，不应提交到版本库。

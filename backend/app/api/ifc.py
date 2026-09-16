@@ -5,7 +5,13 @@ from typing import Optional
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
-from ..schemas import CameraState, ConvertAccepted, ConvertStatus, RecentModel
+from ..schemas import (
+    CameraState,
+    ConvertAccepted,
+    ConvertStatus,
+    ElementBusinessPayload,
+    RecentModel,
+)
 from ..services.ifc_converter import ConverterService
 from ..services.persistence import PersistenceStore
 
@@ -95,6 +101,11 @@ def create_ifc_router(
                 or str(record.get("expressId")) == ifc_guid
             ):
                 record["modelId"] = model_id
+                record["business"] = (
+                    store.get_element_business(model_id, ifc_guid)
+                    or record.get("business")
+                    or {}
+                )
                 return record
 
         raise HTTPException(status_code=404, detail="未找到对应 IFC 构件")
@@ -115,6 +126,27 @@ def create_ifc_router(
             "propertySets": record.get("propertySets", {}),
             "business": record.get("business", {}),
         }
+
+    @router.get("/models/{model_id}/elements/{ifc_guid}/business")
+    async def get_ifc_element_business(model_id: str, ifc_guid: str) -> dict:
+        if not store.get_revision(model_id):
+            raise HTTPException(status_code=404, detail="模型版本不存在")
+        return {
+            "modelId": model_id,
+            "ifcGuid": ifc_guid,
+            "business": store.get_element_business(model_id, ifc_guid),
+        }
+
+    @router.put("/models/{model_id}/elements/{ifc_guid}/business")
+    async def save_ifc_element_business(
+        model_id: str,
+        ifc_guid: str,
+        payload: ElementBusinessPayload,
+    ) -> dict[str, str]:
+        if not store.get_revision(model_id):
+            raise HTTPException(status_code=404, detail="模型版本不存在")
+        store.save_element_business(model_id, ifc_guid, payload.business)
+        return {"status": "saved", "modelId": model_id, "ifcGuid": ifc_guid}
 
     @router.get("/recent", response_model=Optional[RecentModel])
     async def get_recent_model() -> Optional[RecentModel]:

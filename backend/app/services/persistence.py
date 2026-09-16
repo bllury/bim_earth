@@ -67,6 +67,15 @@ class PersistenceStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_revisions_updated
                     ON model_revisions(updated_at DESC);
+                CREATE TABLE IF NOT EXISTS element_business (
+                    model_id TEXT NOT NULL,
+                    element_guid TEXT NOT NULL,
+                    business_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (model_id, element_guid)
+                );
+                CREATE INDEX IF NOT EXISTS idx_element_business_model
+                    ON element_business(model_id);
                 """
             )
 
@@ -194,6 +203,10 @@ class PersistenceStore:
                 (revision["project_id"],),
             )
             connection.execute(
+                "DELETE FROM element_business WHERE model_id IN (?, ?)",
+                (revision_id, revision.get("model_id") or revision_id),
+            )
+            connection.execute(
                 """
                 UPDATE model_revisions
                 SET deleted_at = ?, updated_at = ?
@@ -232,3 +245,45 @@ class PersistenceStore:
             return json.loads(row["camera_json"])
         except json.JSONDecodeError:
             return None
+
+    def save_element_business(
+        self,
+        model_id: str,
+        element_guid: str,
+        business: dict[str, Any],
+    ) -> None:
+        """Stores the operations fields of one IFC element."""
+        payload = json.dumps(business, ensure_ascii=False)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO element_business(
+                    model_id, element_guid, business_json, updated_at
+                )
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(model_id, element_guid) DO UPDATE SET
+                    business_json = excluded.business_json,
+                    updated_at = excluded.updated_at
+                """,
+                (model_id, element_guid, payload, utc_now()),
+            )
+
+    def get_element_business(
+        self, model_id: str, element_guid: str
+    ) -> dict[str, Any]:
+        """Returns the stored operations fields of one IFC element."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT business_json FROM element_business
+                WHERE model_id = ? AND element_guid = ?
+                """,
+                (model_id, element_guid),
+            ).fetchone()
+        if not row:
+            return {}
+        try:
+            data = json.loads(row["business_json"])
+        except json.JSONDecodeError:
+            return {}
+        return data if isinstance(data, dict) else {}

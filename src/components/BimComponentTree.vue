@@ -1,6 +1,11 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from 'vue'
+import { ref } from 'vue'
 import type { BimTreeNode } from '../types/bim'
+import {
+  CONSOLE_HANDLE_HEIGHT,
+  CONSOLE_HEIGHT,
+  useLayoutState,
+} from '../features/layout/useLayoutState'
 
 const props = defineProps<{
   roots: BimTreeNode[]
@@ -21,10 +26,7 @@ const emit = defineEmits<{
 }>()
 
 const expanded = ref<Set<string>>(new Set())
-const collapsed = ref(false)
-const position = ref({ x: 320, y: 20 })
-const dragging = ref(false)
-const dragOffset = ref({ x: 0, y: 0 })
+const { consoleOpen, treePanelOpen } = useLayoutState()
 
 const toggleExpanded = (id: string) => {
   const next = new Set(expanded.value)
@@ -99,47 +101,41 @@ const onNodeClick = (node: BimTreeNode) => {
   }
 }
 
-const startDrag = (event: PointerEvent) => {
-  dragging.value = true
-  dragOffset.value = {
-    x: event.clientX - position.value.x,
-    y: event.clientY - position.value.y,
-  }
-  window.addEventListener('pointermove', onDrag)
-  window.addEventListener('pointerup', stopDrag)
-}
-
-const onDrag = (event: PointerEvent) => {
-  if (!dragging.value) return
-  position.value = {
-    x: Math.max(0, Math.min(window.innerWidth - 40, event.clientX - dragOffset.value.x)),
-    y: Math.max(0, Math.min(window.innerHeight - 40, event.clientY - dragOffset.value.y)),
-  }
-}
-
-const stopDrag = () => {
-  dragging.value = false
-  window.removeEventListener('pointermove', onDrag)
-  window.removeEventListener('pointerup', stopDrag)
-}
-
-onBeforeUnmount(stopDrag)
 </script>
 
 <template>
-  <div
-    class="component-tree"
-    :class="{ collapsed }"
-    :style="{ left: `${position.x}px`, top: `${position.y}px` }"
+  <aside
+    class="bim-tree-panel"
+    :class="{ 'is-collapsed': !treePanelOpen }"
+    :style="{
+      bottom: consoleOpen ? `${CONSOLE_HEIGHT}px` : `${CONSOLE_HANDLE_HEIGHT}px`,
+    }"
   >
-    <div class="tree-header" @pointerdown="startDrag">
-      <strong>构件树</strong>
-      <button @pointerdown.stop @click="collapsed = !collapsed">
-        {{ collapsed ? '展开' : '收起' }}
-      </button>
+    <div class="tree-titlebar">
+      <span class="tree-title">构件树</span>
+      <span v-if="roots.length" class="count-badge">{{ roots.length }}</span>
     </div>
-    <div v-if="!collapsed" class="tree-content">
-      <div class="tree-toolbar" @pointerdown.stop>
+
+    <button
+      class="tree-handle"
+      :aria-expanded="treePanelOpen"
+      :title="treePanelOpen ? '收起构件树' : '展开构件树'"
+      @click="treePanelOpen = !treePanelOpen"
+    >
+      <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+        <path
+          d="M6 3.5 10.5 8 6 12.5"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.6"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </svg>
+    </button>
+
+    <div class="tree-content">
+      <div class="tree-toolbar">
         <div class="mode-switch">
           <button :class="{ active: selectionMode === 'single' }" @click="emit('setMode', 'single')">单选</button>
           <button :class="{ active: selectionMode === 'multi' }" @click="emit('setMode', 'multi')">多选</button>
@@ -148,7 +144,16 @@ onBeforeUnmount(stopDrag)
       </div>
       <div class="opacity-control">
         <label>未选构件透明度：{{ Math.round(unselectedOpacity * 100) }}%</label>
-        <input type="range" min="0" max="1" step="0.05" :value="unselectedOpacity" @input="emit('setOpacity', parseFloat(($event.target as HTMLInputElement).value))" />
+        <input
+          class="slider"
+          type="range"
+          min="0"
+          max="1"
+          step="0.05"
+          :value="unselectedOpacity"
+          :style="{ '--slider-fill': `${unselectedOpacity * 100}%` }"
+          @input="emit('setOpacity', parseFloat(($event.target as HTMLInputElement).value))"
+        />
       </div>
       <div class="tree-root">
         <div v-if="!roots.length" class="tree-empty">IFC 构件树暂无数据，请等待模型元数据加载完成</div>
@@ -190,26 +195,110 @@ onBeforeUnmount(stopDrag)
         </div>
       </div>
     </div>
-  </div>
+  </aside>
 </template>
 
 <style scoped>
-.component-tree {
+.bim-tree-panel {
+  /* Light theme tokens; a dark theme only needs to override this block. */
+  --tp-bg: #ffffff;
+  --tp-fg: #24292f;
+  --tp-muted: #6e7781;
+  --tp-border: #e6e8eb;
+  --tp-hover: #f3f4f6;
+  --tp-accent: #1a56db;
+  --tp-accent-soft: #f2f7ff;
+  --tp-accent-border: #c9dcfb;
+  --tp-row-hover: #f0f7ff;
+  --tp-selected-bg: #dbeafe;
+  --tp-input-border: #d7dbe0;
+  /* Same slider palette as the model sidebar's scale / rotation controls. */
+  --tp-slider: #123c94;
+  --tp-slider-track: #c9ced6;
+  --tp-slider-shadow: rgba(15, 23, 42, 0.22);
+
   position: fixed;
-  z-index: 1050;
+  top: 0;
+  right: 0;
   width: 340px;
-  max-height: 70vh;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-  background: white;
-  border-radius: 8px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.12);
+  background: var(--tp-bg);
+  /* Drawn as a shadow so the border box stays exactly 340px wide and the
+     handle lands flush with the right edge when the panel slides away. */
+  box-shadow: -1px 0 0 var(--tp-border);
+  color: var(--tp-fg);
+  font-size: 13px;
+  z-index: 1200;
+  transition: transform 0.22s ease, bottom 0.22s ease;
 }
 
-.component-tree.collapsed {
-  width: auto;
-  max-height: none;
+.bim-tree-panel.is-collapsed {
+  transform: translateX(100%);
+}
+
+.tree-titlebar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 38px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--tp-border);
+}
+
+.tree-title {
+  font-weight: 600;
+  color: var(--tp-fg);
+}
+
+.count-badge {
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 9px;
+  background: var(--tp-accent-soft);
+  border: 1px solid var(--tp-accent-border);
+  color: var(--tp-accent);
+  font-size: 11px;
+  text-align: center;
+}
+
+.tree-handle {
+  position: absolute;
+  right: 100%;
+  top: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--tp-border);
+  border-right: none;
+  border-radius: 6px 0 0 6px;
+  background: var(--tp-bg);
+  box-shadow: -1px 1px 3px rgba(15, 23, 42, 0.14);
+  color: var(--tp-muted);
+  cursor: pointer;
+}
+
+.tree-handle:hover {
+  background: var(--tp-hover);
+  color: var(--tp-fg);
+}
+
+.tree-handle svg {
+  transition: transform 0.22s ease;
+}
+
+.bim-tree-panel.is-collapsed .tree-handle {
+  background: var(--tp-accent-soft);
+  border-color: var(--tp-accent-border);
+  color: var(--tp-accent);
+}
+
+.bim-tree-panel.is-collapsed .tree-handle svg {
+  transform: rotate(180deg);
 }
 
 .tree-content {
@@ -220,25 +309,13 @@ onBeforeUnmount(stopDrag)
   overflow: hidden;
 }
 
-.tree-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 8px 10px;
-  cursor: move;
-  user-select: none;
-  touch-action: none;
-  border-bottom: 1px solid #ddd;
-}
-
 .tree-toolbar {
   display: flex;
   align-items: center;
   gap: 5px;
   flex-wrap: wrap;
   padding: 8px;
-  border-bottom: 1px solid #ddd;
+  border-bottom: 1px solid var(--tp-border);
 }
 
 .mode-switch {
@@ -247,17 +324,24 @@ onBeforeUnmount(stopDrag)
 }
 
 button {
-  padding: 5px 7px;
-  font-size: 12px;
-  background: #eee;
-  border: 1px solid #ddd;
-  border-radius: 4px;
+  padding: 3px 8px;
+  font-family: inherit;
+  font-size: 11.5px;
+  color: var(--tp-fg);
+  background: var(--tp-bg);
+  border: 1px solid var(--tp-input-border);
+  border-radius: 5px;
   cursor: pointer;
 }
 
+button:hover {
+  background: var(--tp-hover);
+}
+
 button.active {
-  background: #2196f3;
-  color: white;
+  background: var(--tp-accent);
+  border-color: var(--tp-accent);
+  color: #ffffff;
 }
 
 .opacity-control {
@@ -265,12 +349,62 @@ button.active {
   align-items: center;
   gap: 8px;
   padding: 6px 8px;
-  font-size: 12px;
-  border-bottom: 1px solid #ddd;
+  font-size: 11.5px;
+  color: var(--tp-muted);
+  border-bottom: 1px solid var(--tp-border);
 }
 
-.opacity-control input {
-  flex: 1;
+.slider {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 16px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    var(--tp-slider) 0 var(--slider-fill, 0%),
+    var(--tp-slider-track) var(--slider-fill, 0%) 100%
+  );
+}
+
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--tp-bg);
+  border: 2px solid var(--tp-slider);
+  box-shadow: 0 1px 2px var(--tp-slider-shadow);
+}
+
+.slider::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--tp-slider-track);
+}
+
+.slider::-moz-range-progress {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--tp-slider);
+}
+
+.slider::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--tp-bg);
+  border: 2px solid var(--tp-slider);
 }
 
 .tree-root {
@@ -282,8 +416,8 @@ button.active {
 
 .tree-empty {
   padding: 18px 8px;
-  color: #777;
-  font-size: 12px;
+  color: var(--tp-muted);
+  font-size: 11.5px;
   text-align: center;
 }
 
@@ -303,6 +437,7 @@ button.active {
 .tree-node input[type='checkbox'] {
   flex: 0 0 auto;
   margin: 0 2px 0 0;
+  accent-color: var(--tp-accent);
 }
 
 .tree-node.selectable,
@@ -311,11 +446,11 @@ button.active {
 }
 
 .tree-node.leaf:hover {
-  background: #f0f7ff;
+  background: var(--tp-row-hover);
 }
 
 .tree-node.selected {
-  background: #d9edff;
+  background: var(--tp-selected-bg);
 }
 
 .toggle,
@@ -323,6 +458,7 @@ button.active {
   width: 14px;
   text-align: center;
   flex: 0 0 14px;
+  color: var(--tp-muted);
 }
 
 .label {
@@ -330,11 +466,11 @@ button.active {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 13px;
+  font-size: 12.5px;
 }
 
 .element-type {
   font-size: 11px;
-  color: #888;
+  color: var(--tp-muted);
 }
 </style>
