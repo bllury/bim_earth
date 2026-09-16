@@ -23,7 +23,6 @@ const container = ref<HTMLDivElement | null>(null)
 const viewer = shallowRef<Cesium.Viewer | null>(null)
 const markerEntity = shallowRef<Cesium.Entity | null>(null)
 const clickHandler = shallowRef<Cesium.ScreenSpaceEventHandler | null>(null)
-const resizeObserver = ref<ResizeObserver | null>(null)
 
 /** Recreates the coordinate marker and label at the selected world position. */
 const updateMarker = () => {
@@ -115,17 +114,6 @@ onMounted(() => {
 
   viewer.value = currentViewer
 
-  resizeObserver.value = new ResizeObserver(() => {
-    if (!currentViewer.isDestroyed()) {
-      currentViewer.resize()
-    }
-  })
-
-  resizeObserver.value.observe(container.value)
-
-  // 初始化时同步一次尺寸
-  currentViewer.resize()
-
   const handler = new Cesium.ScreenSpaceEventHandler(currentViewer.scene.canvas)
   handler.setInputAction((event: { position: Cesium.Cartesian2 }) => {
     const ifcFeatures = pickIfcFeatures(currentViewer, event.position)
@@ -160,9 +148,6 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
-  resizeObserver.value?.disconnect()
-  resizeObserver.value = null
-
   if (clickHandler.value) {
     clickHandler.value.destroy()
     clickHandler.value = null
@@ -183,10 +168,8 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .earth-viewer {
-  position: relative;
   width: 100%;
-  height: 100%;
-  min-width: 0;
-  min-height: 0;
+  height: 100vh;
+  position: relative;
 }
 </style>
