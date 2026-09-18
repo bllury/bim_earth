@@ -3,6 +3,12 @@
 独立 IFC → 3D Tiles 转换服务。前端默认通过 Vite 将 `/api` 代理到
 `http://localhost:8000`。项目元数据使用 SQLite，模型文件使用 `data/projects/` 文件目录。
 
+## 环境要求
+
+- Python 3.11（64 位）。后端代码需要 3.9+，而 `ifcopenshell` 0.8.x 只提供 3.9~3.14 的 wheel，**不要用 Python 3.8**。
+- 能访问 PyPI（首次安装需要下载 ifcopenshell wheel）。
+- Windows 安装 Python 时勾选 py launcher，`py -3.11 -V` 能输出 3.11.x 再继续。
+
 ## 安装
 
 ```bash
@@ -26,7 +32,9 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-本机没有注册 `py -3.11` 时，可以用已装好依赖的 conda 环境创建虚拟环境：
+激活成功后提示符前会有 `(.venv)`，用 `python -V` 确认是 3.11.x 再继续。
+
+本机（这台机器）没有注册 `py -3.11`，可以用已装好依赖的 conda 环境创建虚拟环境：
 
 ```bash
 C:\ana\envs\bim-ifc\python.exe -m venv .venv
@@ -42,6 +50,8 @@ Windows PowerShell 使用 `$env:` 设置环境变量：
 $env:IFC_CONVERTER_MODE = "ifcopenshell"
 uvicorn app.main:app --reload --port 8000
 ```
+
+看到 `Uvicorn running on http://127.0.0.1:8000` 和 `Application startup complete` 才算启动成功；首次启动会自动创建 `data/`。
 
 ## 转换模式
 

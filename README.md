@@ -48,44 +48,118 @@ Vue 3 + TypeScript + Cesium 的 BIM/IFC 可视化工作台。前端提供三维�
 
 ## 环境要求
 
-- Node.js 20 及以上（开发环境使用 Node 24）
-- Python 3.11，且能安装 `ifcopenshell`
-- 高德 Web 服务 Key（仅地名搜索需要，经纬度定位不依赖）
+| 依赖 | 版本要求 | 说明 |
+| --- | --- | --- |
+| 操作系统 | Windows 10/11 | 下面以 PowerShell 为例，macOS/Linux 差异见“从零开始”末尾 |
+| Git | 任意较新版本 | 用于克隆仓库 |
+| Node.js | 20.19+ 或 22.12+（推荐 22 LTS） | Vite 8 的最低要求 |
+| Python | **3.11（64 位）** | 后端代码需要 3.9+，而 `ifcopenshell` 0.8.x 只提供 3.9+ 的包；请勿使用 3.8 |
+| 网络 | 能访问 npm/PyPI | 安装依赖、下载 Cesium 资源需要 |
+| 高德 Web 服务 Key | 可选 | 只有地名搜索需要；经纬度定位不需要 |
 
-## 快速启动
+## 从零开始（全新机器）
 
-前端：
+### 1. 安装基础工具
+
+Windows 可以用 winget 一次装好：
+
+```powershell
+winget install --id Git.Git -e
+winget install --id OpenJS.NodeJS.LTS -e
+winget install --id Python.Python.3.11 -e
+```
+
+没有 winget 就到官网下载安装包：Git <https://git-scm.com/downloads>、Node.js <https://nodejs.org/>（LTS 版）、Python <https://www.python.org/downloads/>（选择 3.11.x 的 64 位安装包）。
+
+安装 Python 时勾选 **Add python.exe to PATH** 和 **py launcher**，装完重新打开一个 PowerShell 验证：
+
+```powershell
+git --version
+node -v          # 需要 v20.19+ 或 v22.12+
+npm -v
+py -3.11 -V      # 需要输出 Python 3.11.x
+```
+
+如果 `py -3.11 -V` 提示 `Requested Python version (3.11) not installed`，说明 3.11 没装好或没装 py launcher，重新运行安装包并勾选 py launcher。
+
+### 2. 获取代码
+
+```powershell
+git clone https://github.com/bllury/bim_earth.git
+cd bim_earth
+```
+
+也可以直接在 GitHub 页面下载 ZIP 后解压，效果相同。
+
+### 3. 配置前端环境变量
+
+```powershell
+Copy-Item .env.example .env.local
+```
+
+用编辑器打开 `.env.local`，把 `VITE_AMAP_KEY` 换成自己的高德 Web 服务 Key（不填也能启动，只是地名搜索不可用）。`VITE_IFC_API_BASE=/api` 保持默认即可。`.env.local` 已被 Git 忽略，不会提交。
+
+### 4. 启动前端（终端 A）
 
 ```powershell
 npm install
 npm run dev
 ```
 
-后端（Windows PowerShell）：
+看到 `Local: http://localhost:3000/` 即启动成功。Vite 会把 `/api` 代理到后端 `http://localhost:8000`。
+
+### 5. 启动后端（终端 B）
 
 ```powershell
 cd backend
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 $env:IFC_CONVERTER_MODE = "ifcopenshell"
 uvicorn app.main:app --reload --port 8000
 ```
 
-必须用 Python 3.11 创建虚拟环境。本机 `py -3` 指向 Python 3.8，用 3.8 启动时后端会在导入阶段直接报 `TypeError: 'type' object is not subscriptable`，端口不会监听，前端上传随即失败。
+要点：
 
-前端默认运行在 `http://localhost:3000`，Vite 将 `/api` 代理到后端 `http://localhost:8000`。
+- 必须用 Python 3.11 创建这个 `.venv`。如果 PowerShell 提示禁止运行脚本，先执行 `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass`，再重新激活。
+- 激活成功后提示符前会出现 `(.venv)`，用 `python -V` 确认为 3.11.x 再继续。
+- `requirements.txt` 已包含 `ifcopenshell`，首次安装会下载较大的 wheel，耐心等待。安装失败时看下一节常见问题。
+- `IFC_CONVERTER_MODE` 默认值就是 `ifcopenshell`，这里显式设置只是为了避免复用到旧的环境变量。
+- 看到 `Uvicorn running on http://127.0.0.1:8000` 和 `Application startup complete` 才算后端启动成功。后端首次启动会自动创建 `backend/data/`（运行时数据，不提交 Git）。
 
-`requirements.txt` 已包含 `ifcopenshell`；`IFC_CONVERTER_MODE` 的默认值也是 `ifcopenshell`，上面显式设置是为了避免复用到旧环境变量。后端首次启动会自动创建 `backend/data/`。
-
-如果本机没有注册 `py -3.11`，可以直接用已装好依赖的 conda 环境启动：
+本机（这台机器）已经有一个装好依赖的 conda 环境，可以跳过 venv 直接启动：
 
 ```powershell
 cd backend
 C:\ana\envs\bim-ifc\python.exe -m uvicorn app.main:app --reload --port 8000
 ```
 
-前端配置：复制 `.env.example` 为 `.env.local`，按需填写 `VITE_AMAP_KEY`。
+### 6. 验证安装
+
+1. 浏览器打开 <http://localhost:3000>，应能看到 Cesium 地球。
+2. 左上角模型面板点击“上传模型”，选择一个 `.ifc` 文件（面板上没选位置时，先在地球上点一下选择放置点）。
+3. 任务卡会显示转换进度，完成后模型出现在地球上，右侧构件树出现对应构件。
+4. 也可以用命令行确认后端：
+
+```powershell
+Invoke-WebRequest http://127.0.0.1:8000/api/ifc/recent -UseBasicParsing | Select-Object -ExpandProperty Content
+```
+
+返回 `null`（还没上传过模型）或一份模型 JSON 都说明后端正常。
+
+macOS / Linux 差异：把激活命令换成 `source .venv/bin/activate`，其余步骤相同。
+
+## 常见问题
+
+- **`TypeError: 'type' object is not subscriptable`**，指向 `backend/app/schemas.py`：说明后端跑在 Python 3.8 上。后端代码使用 `dict[str, Any]` 这类 3.9+ 语法。删除旧环境重建即可：`Remove-Item -Recurse -Force .venv`，然后重新执行第 5 步，并用 `python -V` 确认是 3.11.x。
+- **`ERROR: Could not find a version that satisfies the requirement ifcopenshell>=0.8.0 (from versions: none)`**：同样是 Python 版本问题。PyPI 上的 `ifcopenshell` 0.8.x 只有 3.9~3.14 的 wheel，没有 3.8 的包。换 3.11 重建 venv。
+- **提示“因为在此系统上禁止运行脚本”**：`Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` 后重新执行 `.\.venv\Scripts\Activate.ps1`。
+- **页面能打开，但上传模型报失败/网络错误**：后端没有启动或没有监听 8000。用 `Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -eq 8000 }` 确认，并检查后端终端的报错。
+- **8000 或 3000 端口被占用**：`Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -eq 8000 } | Select-Object OwningProcess` 找到占用进程后停掉，或换端口启动（换前端端口时记得同步修改 `vite.config.ts` 里的代理目标）。
+- **地名搜索没反应**：`.env.local` 里的 `VITE_AMAP_KEY` 没配置或不是高德“Web 服务”类型的 Key；修改后需要重启 `npm run dev`。经纬度定位不受影响。
+- **Cesium 地球是空白/底图出不来**：底图使用高德在线瓦片，需要能访问 `webrd0*.is.autonavi.com`。
+- **转换很慢**：大模型第一次转换需要时间，任务卡会显示进度。可以调整线程数，见 [backend/README.md](backend/README.md) 的“几何并发与线程数”。
 
 ## 项目结构
 
