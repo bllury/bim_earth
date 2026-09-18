@@ -261,6 +261,13 @@ const getIfcStatusText = (status: IfcConversionStatus) => {
   return '失败'
 }
 
+/** Progress fill width for a task card: only running tasks fill up. */
+const taskProgress = (task: IfcConversionTask) => {
+  if (task.status === 'failed') return '0%'
+  const value = Math.min(Math.max(task.progress ?? 0, 0), 100)
+  return `${value}%`
+}
+
 /** Returns the status color used by the conversion task list. */
 const getIfcStatusColor = (status: IfcConversionStatus) => {
   if (status === 'pending') return '#ff9800'
@@ -2865,7 +2872,12 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div v-for="task in ifcTasks" :key="task.taskId" class="task-card">
+        <div
+          v-for="task in ifcTasks"
+          :key="task.taskId"
+          class="task-card"
+          :style="{ '--task-progress': taskProgress(task) }"
+        >
           <div class="card-head">
             <span class="model-name" :title="task.fileName">{{ task.fileName }}</span>
             <span
@@ -3227,6 +3239,31 @@ onBeforeUnmount(() => {
 .model-card.selected {
   background: var(--sb-card-selected-bg);
   border-color: var(--sb-card-selected-border);
+}
+
+/* Conversion progress sweeps across the whole task card, left to right. */
+.task-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.task-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--task-progress, 0%);
+  background: linear-gradient(
+    90deg,
+    rgba(26, 86, 219, 0.08),
+    rgba(26, 86, 219, 0.18)
+  );
+  transition: width 0.6s ease-out;
+  pointer-events: none;
+}
+
+.task-card .card-head {
+  position: relative;
+  z-index: 1;
 }
 
 .card-head {

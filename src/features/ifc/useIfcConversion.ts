@@ -10,6 +10,7 @@ export interface IfcConversionTask {
   taskId: string
   fileName: string
   status: IfcConversionStatus
+  progress?: number
   message?: string
   error?: string
 }
@@ -122,7 +123,11 @@ export const useIfcConversion = (
         return
       }
 
-      updateTask(taskId, { status: result.status, message: result.message })
+      updateTask(taskId, {
+        status: result.status,
+        message: result.message,
+        progress: result.progress,
+      })
       pollingTasks.delete(taskId)
       pollingTimers.set(
         taskId,
