@@ -8,11 +8,11 @@
 ```bash
 cd bim-earth/backend
 
-# 先确认 Python 位置
+# 先确认 Python 位置（需要 3.11；本机 py -3 指向 3.8，不能用）
 py -0p
 
-# 使用 py 启动器创建虚拟环境；如果只有特定版本，可写为 py -3.12
-py -3 -m venv .venv
+# 明确使用 3.11 创建虚拟环境
+py -3.11 -m venv .venv
 
 # Windows PowerShell 激活，注意开头是 .\，不是 ..
 .\.venv\Scripts\Activate.ps1
@@ -25,6 +25,14 @@ python -m pip install --upgrade pip
 # 安装包含 IfcOpenShell 的完整依赖
 pip install -r requirements.txt
 ```
+
+本机没有注册 `py -3.11` 时，可以用已装好依赖的 conda 环境创建虚拟环境：
+
+```bash
+C:\ana\envs\bim-ifc\python.exe -m venv .venv
+```
+
+用 Python 3.8 启动后端会在导入 `app.main` 时失败（`TypeError: 'type' object is not subscriptable`），端口不会监听。
 
 ## 启动
 
