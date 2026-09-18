@@ -22,14 +22,8 @@ py -3 -m venv .venv
 
 python -m pip install --upgrade pip
 
-# 先安装核心依赖，用于启动服务和 mock 验证
-pip install -r requirements-core.txt
-```
-
-如果要使用真实 IfcOpenShell 转换，再安装：
-
-```bash
-pip install ifcopenshell
+# 安装包含 IfcOpenShell 的完整依赖
+pip install -r requirements.txt
 ```
 
 ## 启动
@@ -37,33 +31,18 @@ pip install ifcopenshell
 Windows PowerShell 使用 `$env:` 设置环境变量：
 
 ```bash
-$env:IFC_CONVERTER_MODE = "mock"
+$env:IFC_CONVERTER_MODE = "ifcopenshell"
 uvicorn app.main:app --reload --port 8000
 ```
 
 ## 转换模式
 
-### 真实 IFC 转换
+服务默认使用 IfcOpenShell 做真实 IFC 转换，依赖已包含在 `requirements.txt` 中。
+如果未安装 `ifcopenshell`，转换任务会返回明确的失败状态，不会伪造成功。
 
-默认使用 IfcOpenShell：
-
-```bash
-$env:IFC_CONVERTER_MODE = "ifcopenshell"
-uvicorn app.main:app --reload --port 8000
-```
-
-要求已安装 `ifcopenshell`。如果未安装，服务会返回明确的失败状态，不会伪造成功。
-
-### 本地 mock 转换
-
-用于在没有 IfcOpenShell 的环境中验证 3D Tiles 加载链路：
-
-```bash
-$env:IFC_CONVERTER_MODE = "mock"
-uvicorn app.main:app --reload --port 8000
-```
-
-Mock 模式会生成一个用于测试的 3D Tiles 立方体，不代表真实 IFC 几何。
+`requirements-core.txt` 只包含 FastAPI、uvicorn 等运行依赖，供离线自测使用：
+把 `IFC_CONVERTER_MODE` 设为 `mock` 时会生成一个测试立方体，仅验证 API 和
+3D Tiles 加载链路，不代表真实 IFC 几何。
 
 ### 几何并发与线程数
 
