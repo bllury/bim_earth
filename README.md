@@ -49,7 +49,7 @@ Vue 3 + TypeScript + Cesium 的 BIM/IFC 可视化工作台。前端提供三维�
 ## 环境要求
 
 - Node.js 20 及以上（开发环境使用 Node 24）
-- Python 3.9 及以上，且能安装 `ifcopenshell`
+- Python 3.11，且能安装 `ifcopenshell`
 - 高德 Web 服务 Key（仅地名搜索需要，经纬度定位不依赖）
 
 ## 快速启动
@@ -65,16 +65,25 @@ npm run dev
 
 ```powershell
 cd backend
-py -3 -m venv .venv
+py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 $env:IFC_CONVERTER_MODE = "ifcopenshell"
 uvicorn app.main:app --reload --port 8000
 ```
 
+必须用 Python 3.11 创建虚拟环境。本机 `py -3` 指向 Python 3.8，用 3.8 启动时后端会在导入阶段直接报 `TypeError: 'type' object is not subscriptable`，端口不会监听，前端上传随即失败。
+
 前端默认运行在 `http://localhost:3000`，Vite 将 `/api` 代理到后端 `http://localhost:8000`。
 
 `requirements.txt` 已包含 `ifcopenshell`；`IFC_CONVERTER_MODE` 的默认值也是 `ifcopenshell`，上面显式设置是为了避免复用到旧环境变量。后端首次启动会自动创建 `backend/data/`。
+
+如果本机没有注册 `py -3.11`，可以直接用已装好依赖的 conda 环境启动：
+
+```powershell
+cd backend
+C:\ana\envs\bim-ifc\python.exe -m uvicorn app.main:app --reload --port 8000
+```
 
 前端配置：复制 `.env.example` 为 `.env.local`，按需填写 `VITE_AMAP_KEY`。
 
