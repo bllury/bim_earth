@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 from .gltf_utils import (
     build_batched_b3dm,
@@ -8,7 +9,7 @@ from .gltf_utils import (
     build_cube_glb,
     write_json,
 )
-from .ifc_converter import ConvertResult
+from .ifc_converter import ConvertResult, ProgressCallback
 
 
 class MockConverter:
@@ -19,7 +20,10 @@ class MockConverter:
         ifc_path: Path,
         output_dir: Path,
         model_id: str,
+        on_progress: Optional[ProgressCallback] = None,
     ) -> ConvertResult:
+        if on_progress is not None:
+            on_progress(50.0, "Mock 转换中")
         glb_bytes = build_cube_glb()
         batch_table = {
             "featureId": 0,

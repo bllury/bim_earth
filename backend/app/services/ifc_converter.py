@@ -5,9 +5,13 @@ from dataclasses import dataclass
 from pathlib import Path
 import shutil
 from threading import Lock
-from typing import Optional, Protocol
+from typing import Callable, Optional, Protocol
 
 from .persistence import PersistenceStore
+
+
+# (percent 0-100, human readable step message)
+ProgressCallback = Callable[[float, str], None]
 
 
 class IfcConverterError(RuntimeError):
@@ -28,6 +32,7 @@ class IfcConverter(Protocol):
         ifc_path: Path,
         output_dir: Path,
         model_id: str,
+        on_progress: Optional[ProgressCallback] = None,
     ) -> ConvertResult:
         ...
 
@@ -105,6 +110,20 @@ class ConverterService:
         with self.lock:
             return task_id in self.cancelled
 
+    def _progress_reporter(self, task_id: str) -> ProgressCallback:
+        """Builds a callback that mirrors converter progress onto the task."""
+
+        def report(percent: float, message: str) -> None:
+            with self.lock:
+                state = self.tasks.get(task_id)
+                if state is None or state.status not in ("pending", "processing"):
+                    return
+                state.progress = max(state.progress, min(max(percent, 0.0), 100.0))
+                if message:
+                    state.message = message
+
+        return report
+
     def _update(self, state: ConversionTaskState) -> None:
         with self.lock:
             if state.task_id in self.cancelled:
@@ -123,7 +142,12 @@ class ConverterService:
         try:
             if self._is_cancelled(task_id):
                 return
-            result = self.converter.convert(ifc_path, output_dir, model_id)
+            result = self.converter.convert(
+                ifc_path,
+                output_dir,
+                model_id,
+                on_progress=self._progress_reporter(task_id),
+            )
             if self._is_cancelled(task_id):
                 return
             if self.persistence and revision_id:

@@ -192,6 +192,24 @@ export const saveIfcCamera = async (
   }
 }
 
+export const saveIfcElementBusiness = async (
+  modelId: string,
+  ifcGuid: string,
+  business: Record<string, unknown>,
+): Promise<void> => {
+  const response = await fetch(
+    `${IFC_API_BASE}/ifc/models/${encodeURIComponent(modelId)}/elements/${encodeURIComponent(ifcGuid)}/business`,
+    {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ business }),
+    },
+  )
+  if (!response.ok) {
+    throw new Error(`运维字段保存失败（${response.status}）`)
+  }
+}
+
 export const deleteIfcRevision = async (revisionId: string): Promise<void> => {
   const response = await fetch(
     `${IFC_API_BASE}/ifc/revisions/${encodeURIComponent(revisionId)}`,

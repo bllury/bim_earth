@@ -23,3 +23,13 @@ backend/data
 *.njsproj
 *.sln
 *.sw?
+
+# Python 虚拟环境与编译产物
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# 构建缓存与运行时数据（模型、瓦片、数据库）
+*.tsbuildinfo
+data/

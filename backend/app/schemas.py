@@ -1,4 +1,4 @@
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel
 
@@ -38,3 +38,7 @@ class RecentModel(BaseModel):
 class CameraState(BaseModel):
     projectId: str
     camera: dict
+
+
+class ElementBusinessPayload(BaseModel):
+    business: dict[str, Any] = {}

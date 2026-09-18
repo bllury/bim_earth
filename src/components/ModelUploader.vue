@@ -4,9 +4,6 @@ import * as Cesium from 'cesium'
 import {
   MAX_MODEL_SCALE,
   MIN_MODEL_SCALE,
-  SLIDER_MAX_MODEL_SCALE,
-  SLIDER_MIN_MODEL_SCALE,
-  SLIDER_STEP,
   createModelTransform,
   worldPointToModel,
 } from '../lib/modelTransforms'
@@ -16,6 +13,7 @@ import {
   fetchRecentIfcModel,
   deleteIfcRevision,
   resolveIfcAssetUrl,
+  saveIfcElementBusiness,
   saveIfcCamera,
   type CameraState,
   type IfcElementGeometry,
@@ -25,6 +23,17 @@ import {
   useIfcConversion,
   type IfcConversionTask,
 } from '../features/ifc/useIfcConversion'
+import {
+  logError,
+  logInfo,
+  logWarn,
+  type ConsoleLogLevel,
+} from '../features/console/appConsole'
+import {
+  CONSOLE_HANDLE_HEIGHT,
+  CONSOLE_HEIGHT,
+  useLayoutState,
+} from '../features/layout/useLayoutState'
 import { useModelPrimitives } from '../features/viewer/useModelPrimitives'
 import {
   useBimModelState,
@@ -51,34 +60,25 @@ const props = defineProps<{
   pickedFeature: PickedIfcFeature | null
 }>()
 
-interface PanelPosition {
-  x: number
-  y: number
-}
-
-interface DragState {
-  pointerId: number
-  startX: number
-  startY: number
-  originX: number
-  originY: number
-}
-
 const ifcTasks = ref<IfcConversionTask[]>([])
 const {
   glbModels,
   ifcModels,
   selectedModelId,
-  selectedModel,
   coordinateInputs,
   scaleDrafts,
   rotationDrafts,
 } = useBimModelState()
+
+/** Number of models, conversions, and pending uploads listed in the sidebar. */
+const modelCount = computed(
+  () => glbModels.value.length + ifcModels.value.length + ifcTasks.value.length,
+)
+
 const isUploading = ref(false)
-const isCollapsed = ref(false)
-const panelPosition = ref<PanelPosition>(getInitialPanelPosition())
+const isInspectorOpen = ref(false)
 const fileInputRef = ref<HTMLInputElement | null>(null)
-const dragState = shallowRef<DragState | null>(null)
+const { modelPanelOpen, consoleOpen } = useLayoutState()
 
 const {
   glbPrimitives,
@@ -93,14 +93,14 @@ const ifcModelTaskIds = new Map<string, string>()
 const ifcProjectIds = new Map<string, string>()
 const cameraSaveTimers = new Map<string, number>()
 const cameraChangeHandlers = new Map<string, () => void>()
+const businessSyncTimers = new Map<string, number>()
+const pendingBusinessSync = new Map<string, Record<string, unknown>>()
+const BUSINESS_SYNC_DELAY = 500
 const recentModelRestoreStarted = ref(false)
 const removedIfcModelIds = new Set<string>()
 const ifcPropertyCache = new Map<string, IfcElementProperties>()
 const ifcGeometryByKey = new Map<string, IfcElementGeometry>()
 const ifcMetadataByKey = new Map<string, IfcMetadataElement>()
-
-let panelAnimationFrame: number | undefined
-let pendingPanelPosition: PanelPosition | null = null
 
 const selectedIfcElement = shallowRef<{
   modelId: string
@@ -124,8 +124,9 @@ const activeSelectionIndex = ref(0)
 const readFlightDistanceMultiplier = () => {
   try {
     const stored = Number(localStorage.getItem('bim-earth-flight-distance'))
-    return Number.isFinite(stored) ? Math.min(Math.max(stored, 1), 8) : 2.8
-  } catch {
+    return Number.isFinite(stored) ? Math.min(Math.max(stored, 1), 24) : 2.8
+  } catch (error) {
+    logInfo('本地存储不可用，飞行距离设置使用默认值', error)
     return 2.8
   }
 }
@@ -147,7 +148,8 @@ const businessByElement = ref<Record<string, Record<string, unknown>>>({})
 const readRecentRestoreEnabled = () => {
   try {
     return localStorage.getItem(RECENT_RESTORE_KEY) !== 'false'
-  } catch {
+  } catch (error) {
+    logInfo('本地存储不可用，最近模型恢复默认开启', error)
     return true
   }
 }
@@ -155,7 +157,8 @@ const readRecentRestoreEnabled = () => {
 const setRecentRestoreEnabled = (enabled: boolean) => {
   try {
     localStorage.setItem(RECENT_RESTORE_KEY, String(enabled))
-  } catch {
+  } catch (error) {
+    logInfo('本地存储不可用，无法保存最近模型恢复开关', error)
     // Storage may be unavailable; persistence of this flag is best-effort.
   }
 }
@@ -178,7 +181,8 @@ const loadAnnotations = () => {
     if (saved) {
       annotations.value = JSON.parse(saved) as BimAnnotation[]
     }
-  } catch {
+  } catch (error) {
+    logInfo('本地存储不可用，构件批注未恢复', error)
     annotations.value = []
   }
 }
@@ -201,7 +205,8 @@ const loadBusinessData = () => {
         Record<string, unknown>
       >
     }
-  } catch {
+  } catch (error) {
+    logInfo('本地存储不可用，运维字段未恢复', error)
     businessByElement.value = {}
   }
 }
@@ -256,6 +261,13 @@ const getIfcStatusText = (status: IfcConversionStatus) => {
   return '失败'
 }
 
+/** Progress fill width for a task card: only running tasks fill up. */
+const taskProgress = (task: IfcConversionTask) => {
+  if (task.status === 'failed') return '0%'
+  const value = Math.min(Math.max(task.progress ?? 0, 0), 100)
+  return `${value}%`
+}
+
 /** Returns the status color used by the conversion task list. */
 const getIfcStatusColor = (status: IfcConversionStatus) => {
   if (status === 'pending') return '#ff9800'
@@ -264,20 +276,10 @@ const getIfcStatusColor = (status: IfcConversionStatus) => {
   return '#f44336'
 }
 
-function getInitialPanelPosition(): PanelPosition {
-  const width = typeof window !== 'undefined' ? window.innerWidth : 1200
-  return {
-    x: Math.max(12, width - 330),
-    y: 20,
-  }
-}
-
 /** Clamps a numeric value to a safe inclusive range. */
 const clamp = (value: number, min: number, max: number) => {
   return Math.min(Math.max(value, min), max)
 }
-
-const PRESET_SCALES = [0.5, 1, 2, 5, 10]
 
 /** Reads the minimum local vertical coordinate from a GLTF document. */
 const getGltfLocalVerticalMinimum = (gltf: Record<string, unknown>) => {
@@ -727,7 +729,7 @@ const removeIfcModel = async (modelId: string) => {
     try {
       await deleteIfcRevision(taskId)
     } catch (error) {
-      console.error('IFC 持久化模型删除失败:', error)
+      logError('IFC 持久化模型删除失败:', error)
       return
     }
   }
@@ -851,7 +853,7 @@ const scheduleCameraSave = (modelId: string) => {
     cameraSaveTimers.delete(modelId)
     if (!props.viewer) return
     void saveIfcCamera(projectId, getCameraState(props.viewer)).catch((error) => {
-      console.warn('Cesium 相机保存失败:', error)
+      logWarn('Cesium 相机保存失败:', error)
     })
   }, 500)
   cameraSaveTimers.set(modelId, timer)
@@ -892,6 +894,7 @@ const loadIfcTileset = async (
 
   loadingIfcModelIds.add(loadedModelId)
   const resolvedTilesetUrl = resolveIfcAssetUrl(tilesetUrl)
+  logInfo(`载入 IFC 模型：${fileName}`, resolvedTilesetUrl)
   const tileset = await Cesium.Cesium3DTileset.fromUrl(resolvedTilesetUrl, {
     show: true,
   })
@@ -926,8 +929,13 @@ const loadIfcTileset = async (
     `已加入 Cesium 场景，等待 tile 事件。` +
     `包围球中心=[${initialCenter?.x ?? 'NaN'}, ${initialCenter?.y ?? 'NaN'}, ${initialCenter?.z ?? 'NaN'}]，` +
     `半径=${initialRadius ?? 'NaN'}`
+  logInfo(`[IFC 载入] ${loadDiagnostic}`)
 
-  const updateLoadDiagnostic = (message: string) => {
+  const updateLoadDiagnostic = (
+    message: string,
+    level: ConsoleLogLevel = 'info',
+    detail?: unknown,
+  ) => {
     if (message === loadDiagnostic) return
     loadDiagnostic = message
     ifcModels.value = ifcModels.value.map((item) =>
@@ -938,6 +946,10 @@ const loadIfcTileset = async (
           }
         : item,
     )
+
+    const writeLog =
+      level === 'error' ? logError : level === 'warn' ? logWarn : logInfo
+    writeLog(`[IFC 载入] ${message}`, detail)
   }
 
   let diagnosticTimer: number | undefined
@@ -975,9 +987,8 @@ const loadIfcTileset = async (
   })
 
   tileset.tileFailed.addEventListener((error: unknown) => {
-    console.error('[IFC tileset] tileFailed', error)
     const message = error instanceof Error ? error.message : JSON.stringify(error)
-    updateLoadDiagnostic(`tileFailed：${message}`)
+    updateLoadDiagnostic(`tileFailed：${message}`, 'error', error)
     clearDiagnosticTimer()
   })
 
@@ -992,19 +1003,22 @@ const loadIfcTileset = async (
   })
 
   diagnosticTimer = window.setTimeout(() => {
-    updateLoadDiagnostic('30 秒诊断超时：未收到 tileLoad/tileFailed/allTilesLoaded')
-    console.warn('[IFC tileset] 30s diagnostic timeout', {
-      url: resolvedTilesetUrl,
-      hasReadyProperty: Object.prototype.hasOwnProperty.call(tileset, 'ready'),
-      ready: (tileset as unknown as { ready?: boolean }).ready,
-      boundingSphere: tileset.boundingSphere,
-    })
+    updateLoadDiagnostic(
+      '30 秒诊断超时：未收到 tileLoad/tileFailed/allTilesLoaded',
+      'warn',
+      {
+        url: resolvedTilesetUrl,
+        hasReadyProperty: Object.prototype.hasOwnProperty.call(tileset, 'ready'),
+        ready: (tileset as unknown as { ready?: boolean }).ready,
+        boundingSphere: tileset.boundingSphere,
+      },
+    )
   }, 30000)
 
   try {
     await props.viewer.zoomTo(tileset)
   } catch (error) {
-    console.warn('[IFC tileset] zoomTo failed', error)
+    logWarn('[IFC tileset] zoomTo failed', error)
   }
 
   const distanceToTileset = props.viewer.camera.distanceToBoundingSphere(
@@ -1120,7 +1134,7 @@ const restoreRecentIfcModel = async () => {
       recent.camera,
     )
   } catch (error) {
-    console.warn('最近 IFC 模型恢复失败:', error)
+    logWarn('最近 IFC 模型恢复失败:', error)
   }
 }
 
@@ -1138,7 +1152,7 @@ const removeIfcTask = async (taskId: string) => {
   try {
     await deleteIfcRevision(taskId)
   } catch (error) {
-    console.error('IFC task delete failed', error)
+    logError('IFC task delete failed', error)
     return
   }
   setRecentRestoreEnabled(false)
@@ -1243,7 +1257,7 @@ const refreshTreeForModel = async (modelId: string) => {
       .filter((item) => item.id !== root.id)
       .concat(root)
   } catch (error) {
-    console.error('IFC 构件树构建失败:', error)
+    logError('IFC 构件树构建失败:', error)
   }
 }
 
@@ -1281,7 +1295,7 @@ const getWorldPositionForElement = (
   ): SelectionGuideItem => {
     const metadata = ifcGeometryByKey.get(`${modelId}:${ifcGuid}`)
     const metadataElement = ifcMetadataByKey.get(`${modelId}:${ifcGuid}`)
-    const worldPosition = feature.worldPosition ?? getWorldPositionForElement(modelId, ifcGuid)
+    const worldPosition = getWorldPositionForElement(modelId, ifcGuid) ?? feature.worldPosition
     const nextFeature = worldPosition === feature.worldPosition
       ? feature
       : { ...feature, worldPosition }
@@ -1345,6 +1359,7 @@ const getWorldPositionForElement = (
 
     try {
       const detail = await fetchIfcElementProperties(modelId, ifcGuid)
+      mergeServerBusiness(modelId, ifcGuid, detail.business)
       ifcPropertyCache.set(cacheKey, detail)
       if (
         selectedIfcElement.value?.modelId === modelId &&
@@ -1353,12 +1368,13 @@ const getWorldPositionForElement = (
         selectedIfcElement.value = { ...selectedIfcElement.value, properties: detail }
       }
     } catch (error) {
-      console.error('IFC 构件属性加载失败:', error)
+      logError('IFC 构件属性加载失败:', error)
     }
   }
 
   /** Stops the selected-feature flash timer and restores original colors. */
   const stopFlashing = () => {
+  let skippedFlashing = 0
   if (flashingTimer !== undefined) {
     window.clearInterval(flashingTimer)
     flashingTimer = undefined
@@ -1370,9 +1386,13 @@ const getWorldPositionForElement = (
         feature.color = getRestoredFeatureColor(key, original)
       } catch {
         // Feature 可能已随 tileset 销毁。
+        skippedFlashing += 1
       }
     }
   })
+  if (skippedFlashing > 0) {
+    logInfo(`已忽略 ${skippedFlashing} 个随 tileset 卸载的构件（停止闪烁还原）`)
+  }
   flashingFeatures.clear()
   activeGuideFeatureKey.value = null
   flashingOn = false
@@ -1497,6 +1517,7 @@ const getRestoredFeatureColor = (key: string, original: Cesium.Color) => {
 
 /** Restores every registered feature to its original appearance. */
 const restoreAllFeatureVisuals = () => {
+  let skippedFeatures = 0
   featureRegistry.forEach((feature, key) => {
     const original = featureOriginalColors.get(key)
     if (original) {
@@ -1504,41 +1525,13 @@ const restoreAllFeatureVisuals = () => {
         feature.color = getRestoredFeatureColor(key, original)
       } catch {
         // Feature 可能已随 tileset 销毁。
+        skippedFeatures += 1
       }
-
-        /** Toggles visibility for every element below a hierarchy node. */
-        const toggleTreeVisibility = (node: BimTreeNode) => {
-          const elementKeys: string[] = []
-          const hierarchyKeys: string[] = []
-          const collect = (current: BimTreeNode) => {
-            hierarchyKeys.push(current.id)
-            if (current.type === 'element' && current.ifcGuid) {
-              elementKeys.push(`${current.modelId}:${current.ifcGuid}`)
-              return
-            }
-            current.children?.forEach(collect)
-          }
-          collect(node)
-          if (!elementKeys.length) return
-
-          const nextHidden = new Set(hiddenElementKeys.value)
-          const shouldHide = elementKeys.some((key) => !nextHidden.has(key))
-          elementKeys.forEach((key) => {
-            if (shouldHide) nextHidden.add(key)
-            else nextHidden.delete(key)
-          })
-          hiddenElementKeys.value = nextHidden
-
-          const nextTreeHidden = new Set(hiddenTreeKeys.value)
-          hierarchyKeys.forEach((key) => {
-            if (shouldHide) nextTreeHidden.add(key)
-            else nextTreeHidden.delete(key)
-          })
-          hiddenTreeKeys.value = nextTreeHidden
-          applyCurrentTreeVisualState()
-        }
     }
   })
+  if (skippedFeatures > 0) {
+    logInfo(`已忽略 ${skippedFeatures} 个随 tileset 卸载的构件（配色还原）`)
+  }
 }
 
 /** Collects all element keys below a hierarchy node. */
@@ -1703,7 +1696,7 @@ const applyTreeSelection = async (node: BimTreeNode) => {
     }
     flyToIfcFeature(feature, node.modelId)
   } else {
-    console.warn('构件几何当前尚未加载')
+    logWarn('构件几何当前尚未加载')
     return
   }
 
@@ -1754,7 +1747,7 @@ const applyTreeSelection = async (node: BimTreeNode) => {
         }
       }
     } catch (error) {
-      console.error('IFC 构件属性加载失败:', error)
+      logError('IFC 构件属性加载失败:', error)
     }
   }
 }
@@ -1863,8 +1856,9 @@ const clearIfcHighlight = () => {
       highlight.feature.color = key
         ? getRestoredFeatureColor(key, highlight.originalColor)
         : highlight.originalColor
-    } catch {
+    } catch (error) {
       // Feature 可能已随 tileset 销毁。
+      logInfo('构件高亮随 tileset 卸载，已忽略还原', error)
     }
   }
   activeIfcHighlight.value = null
@@ -2001,6 +1995,7 @@ const handlePickedFeature = async (feature: PickedIfcFeature | null) => {
   if (!cached) {
     try {
       const detail = await fetchIfcElementProperties(modelId, ifcGuid)
+      mergeServerBusiness(modelId, ifcGuid, detail.business)
       ifcPropertyCache.set(cacheKey, detail)
       if (
         selectedIfcElement.value?.modelId === modelId &&
@@ -2012,7 +2007,7 @@ const handlePickedFeature = async (feature: PickedIfcFeature | null) => {
         }
       }
     } catch (error) {
-      console.error('IFC 构件属性加载失败:', error)
+      logError('IFC 构件属性加载失败:', error)
     }
   }
 }
@@ -2032,6 +2027,72 @@ const selectedElementAnnotations = computed(() => {
       annotation.elementGuid === selectedIfcElement.value.ifcGuid,
   )
 })
+
+/**
+ * Merges business fields stored on the backend into the local cache.
+ * Local values win so an edit made while the backend was unreachable is never
+ * silently overwritten; the backend only fills fields this browser lacks.
+ */
+const mergeServerBusiness = (
+  modelId: string,
+  ifcGuid: string,
+  serverBusiness: Record<string, unknown> | undefined,
+) => {
+  if (!serverBusiness || Object.keys(serverBusiness).length === 0) return
+
+  const cacheKey = `${modelId}:${ifcGuid}`
+  const local = businessByElement.value[cacheKey] ?? {}
+  const merged = { ...serverBusiness, ...local }
+  if (JSON.stringify(merged) === JSON.stringify(local)) return
+
+  businessByElement.value = {
+    ...businessByElement.value,
+    [cacheKey]: merged,
+  }
+  saveBusinessData()
+}
+
+/** Sends one element's business fields to the backend after a short quiet gap. */
+const scheduleBusinessSync = (
+  modelId: string,
+  ifcGuid: string,
+  business: Record<string, unknown>,
+) => {
+  const cacheKey = `${modelId}:${ifcGuid}`
+  pendingBusinessSync.set(cacheKey, business)
+
+  const existing = businessSyncTimers.get(cacheKey)
+  if (existing !== undefined) {
+    window.clearTimeout(existing)
+  }
+
+  businessSyncTimers.set(
+    cacheKey,
+    window.setTimeout(() => {
+      businessSyncTimers.delete(cacheKey)
+      const payload = pendingBusinessSync.get(cacheKey)
+      pendingBusinessSync.delete(cacheKey)
+      if (!payload) return
+      void saveIfcElementBusiness(modelId, ifcGuid, payload).catch((error) => {
+        logWarn('运维字段同步到后端失败：', error)
+      })
+    }, BUSINESS_SYNC_DELAY),
+  )
+}
+
+/** Flushes pending business syncs so unmounting cannot drop an edit. */
+const flushBusinessSync = () => {
+  businessSyncTimers.forEach((timer) => window.clearTimeout(timer))
+  businessSyncTimers.clear()
+  pendingBusinessSync.forEach((payload, cacheKey) => {
+    const [modelId, ...guidParts] = cacheKey.split(':')
+    const ifcGuid = guidParts.join(':')
+    void saveIfcElementBusiness(modelId, ifcGuid, payload).catch((error) => {
+      logWarn('运维字段同步到后端失败：', error)
+    })
+  })
+  pendingBusinessSync.clear()
+}
 
 /** Resolves business fields for the currently active element. */
 const selectedElementBusiness = computed(() => {
@@ -2055,6 +2116,8 @@ const updateBusinessField = (key: string, value: unknown) => {
     [cacheKey]: next,
   }
   saveBusinessData()
+
+  scheduleBusinessSync(element.modelId, element.ifcGuid, next)
 }
 
 /** Creates and persists a user annotation for the active element. */
@@ -2116,9 +2179,13 @@ const updateAnnotationStatus = (
 
 /** Closes the legacy detailed IFC inspector and its highlight. */
 const closeIfcInspector = () => {
-  clearIfcHighlight()
-  selectedIfcElement.value = null
+  isInspectorOpen.value = false
 }
+
+// Clearing the selection also closes the detached property panel.
+watch(selectedIfcElement, (element) => {
+  if (!element) isInspectorOpen.value = false
+})
 
 /** Clears temporary selection guidance and closes its panel. */
 const closeSelectionPanel = () => {
@@ -2129,11 +2196,11 @@ const closeSelectionPanel = () => {
 /** Updates and persists the camera flight distance multiplier. */
 const updateFlightDistance = (value: number) => {
   if (!Number.isFinite(value)) return
-  flightDistanceMultiplier.value = clamp(value, 1, 8)
+  flightDistanceMultiplier.value = clamp(value, 1, 24)
   try {
     localStorage.setItem('bim-earth-flight-distance', String(flightDistanceMultiplier.value))
   } catch (error) {
-    console.warn('飞行距离设置无法保存:', error)
+    logWarn('飞行距离设置无法保存:', error)
   }
 }
 
@@ -2145,6 +2212,57 @@ const findManagedModel = (modelId: string) => {
     null
   )
 }
+
+/**
+ * Reads a numeric input draft. `v-model` on <input type="number"> stores a
+ * number, while programmatic writes store a string, so accept both.
+ */
+const readNumericDraft = (draft: unknown): string => {
+  if (typeof draft === 'number') {
+    return Number.isFinite(draft) ? draft.toString() : ''
+  }
+  if (typeof draft === 'string') {
+    return draft.trim()
+  }
+  return ''
+}
+
+/** Slider span and range for the logarithmic scale control. */
+const SCALE_SLIDER_POSITION_MIN = 0
+const SCALE_SLIDER_POSITION_MAX = 1000
+const SCALE_SLIDER_MIN = 0.1
+const SCALE_SLIDER_MAX = 100
+
+/** Maps a model scale onto the logarithmic scale-slider position. */
+const scaleToSliderPosition = (scale: number) => {
+  const clamped = Math.min(
+    Math.max(scale || SCALE_SLIDER_MIN, SCALE_SLIDER_MIN),
+    SCALE_SLIDER_MAX,
+  )
+  const ratio =
+    Math.log(clamped / SCALE_SLIDER_MIN) /
+    Math.log(SCALE_SLIDER_MAX / SCALE_SLIDER_MIN)
+  return Math.round(ratio * SCALE_SLIDER_POSITION_MAX)
+}
+
+/** Maps a scale-slider position back onto a model scale. */
+const sliderPositionToScale = (position: number) => {
+  const ratio =
+    Math.min(
+      Math.max(position || 0, SCALE_SLIDER_POSITION_MIN),
+      SCALE_SLIDER_POSITION_MAX,
+    ) / SCALE_SLIDER_POSITION_MAX
+  const scale = SCALE_SLIDER_MIN * (SCALE_SLIDER_MAX / SCALE_SLIDER_MIN) ** ratio
+  return Math.round(scale * 100) / 100
+}
+
+/** Filled-track width for the scale slider. */
+const scaleSliderFill = (scale: number) =>
+  `${(scaleToSliderPosition(scale) / SCALE_SLIDER_POSITION_MAX) * 100}%`
+
+/** Filled-track width for the rotation slider. */
+const rotationSliderFill = (rotation: number) =>
+  `${(Math.min(Math.max(rotation, 0), 360) / 360) * 100}%`
 
 /** Updates a model's geographic anchor and Cesium transform. */
 const updateModelPosition = (
@@ -2162,6 +2280,7 @@ const updateModelPosition = (
     latitude < -90 ||
     latitude > 90
   ) {
+    logWarn('经纬度输入无效', { modelId, longitude, latitude })
     alert('经纬度输入无效')
     return
   }
@@ -2222,6 +2341,7 @@ const applyModelScale = (modelId: string, nextScale: number) => {
     safeScale < MIN_MODEL_SCALE ||
     safeScale > MAX_MODEL_SCALE
   ) {
+    logWarn(`模型比例必须在 ${MIN_MODEL_SCALE} 到 ${MAX_MODEL_SCALE} 之间`, { modelId })
     alert(`模型比例必须在 ${MIN_MODEL_SCALE} 到 ${MAX_MODEL_SCALE} 之间`)
     return
   }
@@ -2264,15 +2384,15 @@ const commitScaleInput = (modelId: string) => {
   const model = findManagedModel(modelId)
   if (!model) return
 
-  const draft = scaleDrafts.value[modelId]
-  const nextScale =
-    draft === undefined || draft.trim() === '' ? model.scale : parseFloat(draft)
+  const draft = readNumericDraft(scaleDrafts.value[modelId])
+  const nextScale = draft === '' ? model.scale : parseFloat(draft)
 
   if (
     !Number.isFinite(nextScale) ||
     nextScale < MIN_MODEL_SCALE ||
     nextScale > MAX_MODEL_SCALE
   ) {
+    logWarn(`模型比例必须在 ${MIN_MODEL_SCALE} 到 ${MAX_MODEL_SCALE} 之间`, { modelId })
     alert(`模型比例必须在 ${MIN_MODEL_SCALE} 到 ${MAX_MODEL_SCALE} 之间`)
     scaleDrafts.value = {
       ...scaleDrafts.value,
@@ -2293,11 +2413,15 @@ const applyModelRotation = (modelId: string, nextRotation: number) => {
 
   const safeRotation = Number(nextRotation)
   if (!Number.isFinite(safeRotation)) {
+    logWarn('旋转角度必须是有效数字', { modelId })
     alert('旋转角度必须是有效数字')
     return
   }
 
-  const normalizedRotation = ((safeRotation % 360) + 360) % 360
+  // 360° is visually identical to 0°, but keeping it as-is lets the slider
+  // rest at its right end instead of snapping back to the left.
+  const normalizedRotation =
+    safeRotation === 360 ? 360 : ((safeRotation % 360) + 360) % 360
   const nextMatrix = createModelTransform({
     longitude: model.longitude,
     latitude: model.latitude,
@@ -2340,11 +2464,11 @@ const commitRotationInput = (modelId: string) => {
   const model = findManagedModel(modelId)
   if (!model) return
 
-  const draft = rotationDrafts.value[modelId]
-  const nextRotation =
-    draft === undefined || draft.trim() === '' ? model.rotationZ : parseFloat(draft)
+  const draft = readNumericDraft(rotationDrafts.value[modelId])
+  const nextRotation = draft === '' ? model.rotationZ : parseFloat(draft)
 
   if (!Number.isFinite(nextRotation)) {
+    logWarn('旋转角度必须是有效数字', { modelId })
     alert('旋转角度必须是有效数字')
     rotationDrafts.value = {
       ...rotationDrafts.value,
@@ -2485,6 +2609,7 @@ const handleFileUpload = async (event: Event) => {
   const target = event.target as HTMLInputElement
   const files = target.files
   if (!files || files.length === 0 || !props.viewer || !props.position) {
+    logWarn('上传前未选择放置位置')
     alert('请先在地球上选择放置位置')
     return
   }
@@ -2509,7 +2634,7 @@ const handleFileUpload = async (event: Event) => {
         await startIfcConversion(file, longitude, latitude)
       }
     } catch (error) {
-      console.error('模型加载失败:', error)
+      logError('模型加载失败:', error)
       alert(
         `模型 ${file.name} 加载失败：${error instanceof Error ? error.message : '未知错误'}`,
       )
@@ -2559,75 +2684,8 @@ const removeModel = (modelId: string) => {
   removeLocalModelData(modelId)
 }
 
-/** Starts dragging the model-management panel. */
-const handlePanelPointerDown = (event: PointerEvent) => {
-  if ((event.target as HTMLElement).closest('button')) return
-
-  dragState.value = {
-    pointerId: event.pointerId,
-    startX: event.clientX,
-    startY: event.clientY,
-    originX: panelPosition.value.x,
-    originY: panelPosition.value.y,
-  }
-  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
-}
-
-/** Updates the model-management panel position during dragging. */
-const handlePanelPointerMove = (event: PointerEvent) => {
-  const state = dragState.value
-  if (!state || state.pointerId !== event.pointerId) return
-
-  const width = window.innerWidth
-  const height = window.innerHeight
-  pendingPanelPosition = {
-    x: clamp(
-      state.originX + event.clientX - state.startX,
-      0,
-      Math.max(0, width - 80),
-    ),
-    y: clamp(
-      state.originY + event.clientY - state.startY,
-      0,
-      Math.max(0, height - 40),
-    ),
-  }
-
-  if (panelAnimationFrame === undefined) {
-    panelAnimationFrame = window.requestAnimationFrame(() => {
-      panelAnimationFrame = undefined
-      if (pendingPanelPosition) {
-        panelPosition.value = pendingPanelPosition
-        pendingPanelPosition = null
-      }
-    })
-  }
-}
-
-/** Finishes panel dragging and releases pointer capture. */
-const handlePanelPointerUp = (event: PointerEvent) => {
-  if (dragState.value?.pointerId !== event.pointerId) return
-
-  if (panelAnimationFrame !== undefined) {
-    window.cancelAnimationFrame(panelAnimationFrame)
-    panelAnimationFrame = undefined
-  }
-  if (pendingPanelPosition) {
-    panelPosition.value = pendingPanelPosition
-    pendingPanelPosition = null
-  }
-  dragState.value = null
-  if ((event.currentTarget as HTMLElement).hasPointerCapture(event.pointerId)) {
-    ;(event.currentTarget as HTMLElement).releasePointerCapture(event.pointerId)
-  }
-}
-
 onBeforeUnmount(() => {
   clearIfcHighlight()
-  if (panelAnimationFrame !== undefined) {
-    window.cancelAnimationFrame(panelAnimationFrame)
-    panelAnimationFrame = undefined
-  }
   disposeModelPrimitives(props.viewer)
   disposeIfcConversion()
   if (props.viewer) {
@@ -2638,6 +2696,7 @@ onBeforeUnmount(() => {
   cameraChangeHandlers.clear()
   cameraSaveTimers.forEach((timer) => window.clearTimeout(timer))
   cameraSaveTimers.clear()
+  flushBusinessSync()
   ifcProjectIds.clear()
   loadingIfcModelIds.clear()
   ifcModelTaskIds.clear()
@@ -2646,25 +2705,35 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div
-    class="model-panel"
-    :class="{ collapsed: isCollapsed }"
-    :style="{ left: `${panelPosition.x}px`, top: `${panelPosition.y}px` }"
+  <aside
+    class="bim-sidebar"
+    :class="{ 'is-collapsed': !modelPanelOpen }"
+    :style="{
+      bottom: consoleOpen ? `${CONSOLE_HEIGHT}px` : `${CONSOLE_HANDLE_HEIGHT}px`,
+    }"
   >
-    <div
-      class="panel-header"
-      @pointerdown="handlePanelPointerDown"
-      @pointermove="handlePanelPointerMove"
-      @pointerup="handlePanelPointerUp"
-      @pointercancel="handlePanelPointerUp"
-    >
-      <h3>BIM 模型管理</h3>
-      <button @click="isCollapsed = !isCollapsed">
-        {{ isCollapsed ? '展开' : '收起' }}
-      </button>
+    <div class="sidebar-titlebar">
+      <span class="sidebar-title">模型管理</span>
+      <span v-if="modelCount > 0" class="count-badge">{{ modelCount }}</span>
     </div>
 
-    <template v-if="!isCollapsed">
+    <button
+      class="sidebar-handle"
+      :aria-expanded="modelPanelOpen"
+      :title="modelPanelOpen ? '收起模型管理' : '展开模型管理'"
+      @click="modelPanelOpen = !modelPanelOpen"
+    >
+      <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+        <path
+          d="M10 3.5 5.5 8 10 12.5"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.6"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+        />
+      </svg>
+    </button>
       <input
         ref="fileInputRef"
         type="file"
@@ -2679,18 +2748,13 @@ onBeforeUnmount(() => {
         :disabled="isUploading"
         @click="fileInputRef?.click()"
       >
-        {{ isUploading ? '上传中...' : '上传模型（glTF/GLB/IFC）' }}
+        <span class="upload-icon" aria-hidden="true">＋</span>
+        {{ isUploading ? '上传中…' : '上传模型' }}
       </button>
 
       <p v-if="!position" class="hint">请先在地球上点击选择位置</p>
 
       <div class="model-list">
-        <h4>模型列表 ({{ glbModels.length + ifcModels.length + ifcTasks.length }})</h4>
-
-        <p v-if="glbModels.length === 0 && ifcModels.length === 0 && ifcTasks.length === 0">
-          暂无模型
-        </p>
-
         <div
           v-for="model in glbModels"
           :key="model.modelId"
@@ -2698,57 +2762,137 @@ onBeforeUnmount(() => {
           :class="{ selected: selectedModelId === model.modelId }"
           @click="selectedModelId = model.modelId"
         >
-          <div class="model-name" :title="model.name">{{ model.name }}</div>
-          <div class="model-actions">
-            <button @click.stop="flyToModel(model)">定位</button>
-            <button class="danger" @click.stop="removeModel(model.modelId)">删除</button>
+          <div class="card-head">
+            <span class="model-name" :title="model.name">{{ model.name }}</span>
+            <button class="mini-button" @click.stop="flyToModel(model)">定位</button>
+            <button
+              class="mini-button danger"
+              @click.stop="removeModel(model.modelId)"
+            >
+              删除
+            </button>
           </div>
-          <div class="coordinate-row">
-            <input
-              :value="coordinateInputs[model.modelId]?.longitude ?? model.longitude.toFixed(6)"
-              placeholder="经度"
-              @input="
-                (event) =>
-                  (coordinateInputs[model.modelId] = {
-                    longitude: (event.target as HTMLInputElement).value,
-                    latitude:
-                      coordinateInputs[model.modelId]?.latitude ??
-                      model.latitude.toFixed(6),
-                  })
-              "
-            />
-            <input
-              :value="coordinateInputs[model.modelId]?.latitude ?? model.latitude.toFixed(6)"
-              placeholder="纬度"
-              @input="
-                (event) =>
-                  (coordinateInputs[model.modelId] = {
-                    longitude:
-                      coordinateInputs[model.modelId]?.longitude ??
-                      model.longitude.toFixed(6),
-                    latitude: (event.target as HTMLInputElement).value,
-                  })
-              "
-            />
+          <div class="card-body">
+            <div class="field-group coords">
+              <input
+                class="field coord"
+                :value="coordinateInputs[model.modelId]?.longitude ?? model.longitude.toFixed(6)"
+                placeholder="经度"
+                @input="
+                  (event) =>
+                    (coordinateInputs[model.modelId] = {
+                      longitude: (event.target as HTMLInputElement).value,
+                      latitude:
+                        coordinateInputs[model.modelId]?.latitude ??
+                        model.latitude.toFixed(6),
+                    })
+                "
+              />
+              <input
+                class="field coord"
+                :value="coordinateInputs[model.modelId]?.latitude ?? model.latitude.toFixed(6)"
+                placeholder="纬度"
+                @input="
+                  (event) =>
+                    (coordinateInputs[model.modelId] = {
+                      longitude:
+                        coordinateInputs[model.modelId]?.longitude ??
+                        model.longitude.toFixed(6),
+                      latitude: (event.target as HTMLInputElement).value,
+                    })
+                "
+              />
+              <button
+                class="mini-button"
+                @click.stop="updateModelPosition(model.modelId, parseFloat(coordinateInputs[model.modelId]?.longitude ?? model.longitude.toFixed(6)), parseFloat(coordinateInputs[model.modelId]?.latitude ?? model.latitude.toFixed(6)))"
+              >
+                更新坐标
+              </button>
+            </div>
+            <div class="field-group transform">
+              <div class="transform-row">
+                <label class="field-label">比例</label>
+                <input
+                  class="slider"
+                  type="range"
+                  :min="SCALE_SLIDER_POSITION_MIN"
+                  :max="SCALE_SLIDER_POSITION_MAX"
+                  step="1"
+                  :value="scaleToSliderPosition(model.scale)"
+                  :style="{ '--slider-fill': scaleSliderFill(model.scale) }"
+                  @input="
+                    applyModelScale(
+                      model.modelId,
+                      sliderPositionToScale(
+                        ($event.target as HTMLInputElement).valueAsNumber,
+                      ),
+                    )
+                  "
+                />
+                <input
+                  v-model="scaleDrafts[model.modelId]"
+                  class="field num"
+                  type="number"
+                  :min="MIN_MODEL_SCALE"
+                  :max="MAX_MODEL_SCALE"
+                  step="0.1"
+                  @blur="commitScaleInput(model.modelId)"
+                  @keydown.enter="commitScaleInput(model.modelId)"
+                />
+              </div>
+              <div class="transform-row">
+                <label class="field-label">旋转</label>
+                <input
+                  class="slider"
+                  type="range"
+                  min="0"
+                  max="360"
+                  step="1"
+                  :value="model.rotationZ"
+                  :style="{ '--slider-fill': rotationSliderFill(model.rotationZ) }"
+                  @input="
+                    applyModelRotation(
+                      model.modelId,
+                      ($event.target as HTMLInputElement).valueAsNumber,
+                    )
+                  "
+                />
+                <input
+                  v-model="rotationDrafts[model.modelId]"
+                  class="field num"
+                  type="number"
+                  min="0"
+                  max="360"
+                  step="1"
+                  @blur="commitRotationInput(model.modelId)"
+                  @keydown.enter="commitRotationInput(model.modelId)"
+                />
+              </div>
+            </div>
           </div>
-          <button class="update-button" @click.stop="updateModelPosition(model.modelId, parseFloat(coordinateInputs[model.modelId]?.longitude ?? model.longitude.toFixed(6)), parseFloat(coordinateInputs[model.modelId]?.latitude ?? model.latitude.toFixed(6)))">
-            更新坐标
-          </button>
         </div>
 
-        <div v-for="task in ifcTasks" :key="task.taskId" class="task-card">
-          <div class="task-row">
-            <span class="task-name" :title="task.fileName">{{ task.fileName }}</span>
+        <div
+          v-for="task in ifcTasks"
+          :key="task.taskId"
+          class="task-card"
+          :style="{ '--task-progress': taskProgress(task) }"
+        >
+          <div class="card-head">
+            <span class="model-name" :title="task.fileName">{{ task.fileName }}</span>
             <span
               class="task-status"
               :style="{ color: getIfcStatusColor(task.status) }"
             >
               {{ getIfcStatusText(task.status) }}
             </span>
-            <button class="danger" @click="removeIfcTask(task.taskId)">删除</button>
+            <button
+              class="mini-button danger"
+              @click.stop="removeIfcTask(task.taskId)"
+            >
+              删除
+            </button>
           </div>
-          <p v-if="task.error" class="error">{{ task.error }}</p>
-          <p v-else-if="task.message" class="message">{{ task.message }}</p>
         </div>
 
         <div
@@ -2758,215 +2902,272 @@ onBeforeUnmount(() => {
           :class="{ selected: selectedModelId === model.modelId }"
           @click="selectedModelId = model.modelId"
         >
-          <div class="model-name" :title="model.name">{{ model.name }}</div>
-          <p class="diagnostic">{{ model.loadDiagnostic ?? '等待 Cesium 加载事件' }}</p>
-          <div class="model-actions">
-            <button @click.stop="flyToIfcModel(model)">定位</button>
-            <button class="danger" @click.stop="removeIfcModel(model.modelId)">删除</button>
-          </div>
-          <div class="coordinate-row">
-            <input
-              :value="coordinateInputs[model.modelId]?.longitude ?? model.longitude.toFixed(6)"
-              placeholder="经度"
-              @input="
-                (event) =>
-                  (coordinateInputs[model.modelId] = {
-                    longitude: (event.target as HTMLInputElement).value,
-                    latitude:
-                      coordinateInputs[model.modelId]?.latitude ??
-                      model.latitude.toFixed(6),
-                  })
-              "
-            />
-            <input
-              :value="coordinateInputs[model.modelId]?.latitude ?? model.latitude.toFixed(6)"
-              placeholder="纬度"
-              @input="
-                (event) =>
-                  (coordinateInputs[model.modelId] = {
-                    longitude:
-                      coordinateInputs[model.modelId]?.longitude ??
-                      model.longitude.toFixed(6),
-                    latitude: (event.target as HTMLInputElement).value,
-                  })
-              "
-            />
-          </div>
-          <button class="update-button" @click.stop="updateModelPosition(model.modelId, parseFloat(coordinateInputs[model.modelId]?.longitude ?? model.longitude.toFixed(6)), parseFloat(coordinateInputs[model.modelId]?.latitude ?? model.latitude.toFixed(6)))">
-            更新坐标
-          </button>
-        </div>
-      </div>
-
-      <div class="transform-panel">
-        <h4>模型比例</h4>
-
-        <p v-if="!selectedModel">请先在模型列表中选中一个模型</p>
-
-        <template v-else>
-          <div class="transform-title">
-            <span class="selected-model-name" :title="selectedModel.name">
-              {{ selectedModel.name }}
-            </span>
-            <strong>{{ selectedModel.scale.toFixed(2) }}x</strong>
-          </div>
-
-          <div class="input-row">
-            <input
-              v-model="scaleDrafts[selectedModel.modelId]"
-              type="number"
-              :min="MIN_MODEL_SCALE"
-              :max="MAX_MODEL_SCALE"
-              step="0.1"
-              @blur="commitScaleInput(selectedModel.modelId)"
-              @keydown.enter="commitScaleInput(selectedModel.modelId)"
-            />
-            <button @click="commitScaleInput(selectedModel.modelId)">应用</button>
-          </div>
-
-          <input
-            class="range"
-            type="range"
-            :min="SLIDER_MIN_MODEL_SCALE"
-            :max="SLIDER_MAX_MODEL_SCALE"
-            :step="SLIDER_STEP"
-            :value="selectedModel.scale"
-            @input="applyModelScale(selectedModel.modelId, parseFloat(($event.target as HTMLInputElement).value))"
-          />
-
-          <div class="preset-row">
+          <div class="card-head">
+            <span class="model-name" :title="model.name">{{ model.name }}</span>
+            <button class="mini-button" @click.stop="flyToIfcModel(model)">定位</button>
             <button
-              v-for="presetScale in PRESET_SCALES"
-              :key="presetScale"
-              @click="applyModelScale(selectedModel.modelId, presetScale)"
+              class="mini-button danger"
+              @click.stop="removeIfcModel(model.modelId)"
             >
-              {{ presetScale }}x
+              删除
             </button>
           </div>
-
-          <p class="hint">等比缩放；模型最低点会根据包围盒保持贴地。</p>
-
-          <div class="rotation-section">
-            <h5>模型旋转</h5>
-            <div class="input-row">
+          <div class="card-body">
+            <div class="field-group coords">
               <input
-                v-model="rotationDrafts[selectedModel.modelId]"
-                type="number"
-                min="0"
-                max="360"
-                step="1"
-                @blur="commitRotationInput(selectedModel.modelId)"
-                @keydown.enter="commitRotationInput(selectedModel.modelId)"
+                class="field coord"
+                :value="coordinateInputs[model.modelId]?.longitude ?? model.longitude.toFixed(6)"
+                placeholder="经度"
+                @input="
+                  (event) =>
+                    (coordinateInputs[model.modelId] = {
+                      longitude: (event.target as HTMLInputElement).value,
+                      latitude:
+                        coordinateInputs[model.modelId]?.latitude ??
+                        model.latitude.toFixed(6),
+                    })
+                "
               />
-              <button @click="commitRotationInput(selectedModel.modelId)">应用</button>
-            </div>
-            <input
-              class="range"
-              type="range"
-              min="0"
-              max="360"
-              step="1"
-              :value="selectedModel.rotationZ"
-              @input="applyModelRotation(selectedModel.modelId, parseFloat(($event.target as HTMLInputElement).value))"
-            />
-            <div class="preset-row">
+              <input
+                class="field coord"
+                :value="coordinateInputs[model.modelId]?.latitude ?? model.latitude.toFixed(6)"
+                placeholder="纬度"
+                @input="
+                  (event) =>
+                    (coordinateInputs[model.modelId] = {
+                      longitude:
+                        coordinateInputs[model.modelId]?.longitude ??
+                        model.longitude.toFixed(6),
+                      latitude: (event.target as HTMLInputElement).value,
+                    })
+                "
+              />
               <button
-                v-for="rotation in [0, 90, 180, 270, 360]"
-                :key="rotation"
-                @click="applyModelRotation(selectedModel.modelId, rotation)"
+                class="mini-button"
+                @click.stop="updateModelPosition(model.modelId, parseFloat(coordinateInputs[model.modelId]?.longitude ?? model.longitude.toFixed(6)), parseFloat(coordinateInputs[model.modelId]?.latitude ?? model.latitude.toFixed(6)))"
               >
-                {{ rotation }}°
+                更新坐标
               </button>
             </div>
+            <div class="field-group transform">
+              <div class="transform-row">
+                <label class="field-label">比例</label>
+                <input
+                  class="slider"
+                  type="range"
+                  :min="SCALE_SLIDER_POSITION_MIN"
+                  :max="SCALE_SLIDER_POSITION_MAX"
+                  step="1"
+                  :value="scaleToSliderPosition(model.scale)"
+                  :style="{ '--slider-fill': scaleSliderFill(model.scale) }"
+                  @input="
+                    applyModelScale(
+                      model.modelId,
+                      sliderPositionToScale(
+                        ($event.target as HTMLInputElement).valueAsNumber,
+                      ),
+                    )
+                  "
+                />
+                <input
+                  v-model="scaleDrafts[model.modelId]"
+                  class="field num"
+                  type="number"
+                  :min="MIN_MODEL_SCALE"
+                  :max="MAX_MODEL_SCALE"
+                  step="0.1"
+                  @blur="commitScaleInput(model.modelId)"
+                  @keydown.enter="commitScaleInput(model.modelId)"
+                />
+              </div>
+              <div class="transform-row">
+                <label class="field-label">旋转</label>
+                <input
+                  class="slider"
+                  type="range"
+                  min="0"
+                  max="360"
+                  step="1"
+                  :value="model.rotationZ"
+                  :style="{ '--slider-fill': rotationSliderFill(model.rotationZ) }"
+                  @input="
+                    applyModelRotation(
+                      model.modelId,
+                      ($event.target as HTMLInputElement).valueAsNumber,
+                    )
+                  "
+                />
+                <input
+                  v-model="rotationDrafts[model.modelId]"
+                  class="field num"
+                  type="number"
+                  min="0"
+                  max="360"
+                  step="1"
+                  @blur="commitRotationInput(model.modelId)"
+                  @keydown.enter="commitRotationInput(model.modelId)"
+                />
+              </div>
+            </div>
           </div>
-        </template>
+        </div>
       </div>
-    </template>
+  </aside>
 
-    <SelectionInfoPanel
-      v-if="selectionItems.length"
-      :viewer="props.viewer"
-      :items="selectionItems"
-      :active-index="activeSelectionIndex"
-      :flight-distance-multiplier="flightDistanceMultiplier"
-      @select="selectGuideItem"
-      @update-flight-distance="updateFlightDistance"
-      @close="closeSelectionPanel"
-    />
+  <!-- Rendered outside the sliding sidebar so collapsing it cannot move them. -->
+  <SelectionInfoPanel
+    v-if="selectionItems.length"
+    :viewer="props.viewer"
+    :items="selectionItems"
+    :active-index="activeSelectionIndex"
+    :flight-distance-multiplier="flightDistanceMultiplier"
+    :properties="selectedIfcElement?.properties ?? null"
+    @select="selectGuideItem"
+    @update-flight-distance="updateFlightDistance"
+    @open-inspector="isInspectorOpen = true"
+    @close="closeSelectionPanel"
+  />
 
-    <IfcInspectorPanel
-      v-if="selectedIfcElement && selectionItems.length === 0"
-      :element="selectedIfcElement"
-      :annotations="selectedElementAnnotations"
-      :business="selectedElementBusiness"
-      @close="closeIfcInspector"
-      @add-annotation="addAnnotation"
-      @update-status="updateAnnotationStatus"
-      @update-business="updateBusinessField"
-    />
-  </div>
+  <IfcInspectorPanel
+    v-if="isInspectorOpen && selectedIfcElement"
+    :element="selectedIfcElement"
+    :annotations="selectedElementAnnotations"
+    :business="selectedElementBusiness"
+    @close="closeIfcInspector"
+    @add-annotation="addAnnotation"
+    @update-status="updateAnnotationStatus"
+    @update-business="updateBusinessField"
+  />
 
-  <div class="component-tree-wrap">
-    <BimComponentTree
-      :roots="componentTreeRoots"
-      :selection-mode="treeSelectionMode"
-      :selected-key="selectedTreeKey"
-      :multi-selected-keys="multiSelectedKeys"
-      :unselected-opacity="multiUnselectedOpacity"
-      :hidden-keys="hiddenElementKeys"
-      @select-element="applyTreeSelection"
-      @toggle-multi-element="toggleTreeMultiSelection"
-      @clear-selection="clearTreeSelection"
-      @set-mode="setTreeSelectionMode"
-      @set-opacity="setMultiUnselectedOpacity"
-      @toggle-visibility="toggleTreeVisibility"
-    />
-  </div>
+  <BimComponentTree
+    :roots="componentTreeRoots"
+    :selection-mode="treeSelectionMode"
+    :selected-key="selectedTreeKey"
+    :multi-selected-keys="multiSelectedKeys"
+    :unselected-opacity="multiUnselectedOpacity"
+    :hidden-keys="hiddenElementKeys"
+    @select-element="applyTreeSelection"
+    @toggle-multi-element="toggleTreeMultiSelection"
+    @clear-selection="clearTreeSelection"
+    @set-mode="setTreeSelectionMode"
+    @set-opacity="setMultiUnselectedOpacity"
+    @toggle-visibility="toggleTreeVisibility"
+  />
 
 </template>
 
 <style scoped>
-.model-panel {
-  position: absolute;
-  z-index: 1000;
-  background: white;
-  padding: 12px;
-  border-radius: 8px;
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
-  width: 340px;
-  max-height: 80vh;
+.bim-sidebar {
+  /* Light theme tokens; a dark theme only needs to override this block. */
+  --sb-bg: #ffffff;
+  --sb-fg: #24292f;
+  --sb-muted: #6e7781;
+  --sb-border: #e6e8eb;
+  --sb-hover: #f3f4f6;
+  --sb-accent: #1a56db;
+  --sb-accent-soft: #f2f7ff;
+  --sb-accent-hover: #e6f0ff;
+  --sb-accent-border: #c9dcfb;
+  --sb-danger: #c4362f;
+  --sb-danger-soft: #fdecec;
+  --sb-danger-border: #f2c9c7;
+  --sb-warning: #9a6700;
+  --sb-card-bg: #fbfcfd;
+  --sb-card-border: #e6e8eb;
+  --sb-card-selected-bg: #f2f7ff;
+  --sb-card-selected-border: #a9c7f5;
+  --sb-input-bg: #ffffff;
+  --sb-input-border: #d7dbe0;
+  --sb-placeholder: #9aa4ae;
+  --sb-focus-ring: rgba(26, 86, 219, 0.12);
+  /* Upload-button blue darkened ~20% and shifted toward black. */
+  --sb-slider: #123c94;
+  --sb-slider-track: #c9ced6;
+  --sb-slider-shadow: rgba(15, 23, 42, 0.22);
+
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 320px;
   display: flex;
   flex-direction: column;
+  background: var(--sb-bg);
+  /* Drawn as a shadow so the border box stays exactly 320px wide and the
+     handle lands at x=0 when the panel is slid away. */
+  box-shadow: 1px 0 0 var(--sb-border);
+  color: var(--sb-fg);
+  font-size: 13px;
+  z-index: 1200;
+  transition: transform 0.22s ease, bottom 0.22s ease;
 }
 
-.model-panel.collapsed {
-  width: auto;
-  max-height: none;
+.bim-sidebar.is-collapsed {
+  transform: translateX(-100%);
 }
 
-.panel-header {
+.sidebar-titlebar {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  cursor: move;
-  touch-action: none;
-  user-select: none;
+  gap: 6px;
+  height: 38px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--sb-border);
 }
 
-.panel-header h3 {
-  margin: 0;
-  font-size: 16px;
+.sidebar-title {
+  font-weight: 600;
+  color: var(--sb-fg);
 }
 
-.panel-header button {
-  padding: 4px 8px;
-  font-size: 12px;
-  background: #607d8b;
-  color: white;
-  border: none;
-  border-radius: 4px;
+.sidebar-handle {
+  position: absolute;
+  left: 100%;
+  top: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--sb-border);
+  border-left: none;
+  border-radius: 0 6px 6px 0;
+  background: var(--sb-bg);
+  box-shadow: 1px 1px 3px rgba(15, 23, 42, 0.14);
+  color: var(--sb-muted);
   cursor: pointer;
+}
+
+.sidebar-handle:hover {
+  background: var(--sb-hover);
+  color: var(--sb-fg);
+}
+
+.sidebar-handle svg {
+  transition: transform 0.22s ease;
+}
+
+.bim-sidebar.is-collapsed .sidebar-handle {
+  background: var(--sb-accent-soft);
+  border-color: var(--sb-accent-border);
+  color: var(--sb-accent);
+}
+
+.bim-sidebar.is-collapsed .sidebar-handle svg {
+  transform: rotate(180deg);
+}
+
+.count-badge {
+  flex: 0 0 auto;
+  min-width: 18px;
+  padding: 1px 6px;
+  border-radius: 9px;
+  background: var(--sb-accent-soft);
+  border: 1px solid var(--sb-accent-border);
+  color: var(--sb-accent);
+  font-size: 11px;
+  text-align: center;
 }
 
 .hidden-input {
@@ -2974,218 +3175,267 @@ onBeforeUnmount(() => {
 }
 
 .upload-button {
-  width: 100%;
-  padding: 10px;
-  margin-top: 10px;
-  background: #4caf50;
-  color: white;
-  border: none;
-  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  margin: 10px 10px 0 10px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--sb-accent);
+  background: var(--sb-accent-soft);
+  border: 1px solid var(--sb-accent-border);
+  border-radius: 6px;
   cursor: pointer;
-  font-size: 14px;
+}
+
+.upload-button:hover:not(:disabled) {
+  background: var(--sb-accent-hover);
 }
 
 .upload-button:disabled {
-  background: #ccc;
+  color: var(--sb-muted);
+  background: var(--sb-hover);
+  border-color: var(--sb-border);
   cursor: not-allowed;
 }
 
+.upload-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
 .hint {
-  color: #ff9800;
+  flex: 0 0 auto;
+  margin: 8px 10px 0 10px;
   font-size: 12px;
-  margin: 10px 0 0 0;
+  color: var(--sb-warning);
 }
 
 .model-list {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
   overflow-y: auto;
-  margin-top: 10px;
-}
-
-.model-list h4 {
-  margin: 0 0 10px 0;
+  padding: 10px;
 }
 
 .model-card,
 .task-card {
-  padding: 8px;
-  margin-bottom: 8px;
-  background: #f5f5f5;
-  border-radius: 4px;
-  border: 1px solid #e0e0e0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 9px;
+  background: var(--sb-card-bg);
+  border: 1px solid var(--sb-card-border);
+  border-radius: 6px;
   cursor: pointer;
 }
 
 .model-card.selected {
-  background: #e3f2fd;
-  border-color: #2196f3;
+  background: var(--sb-card-selected-bg);
+  border-color: var(--sb-card-selected-border);
+}
+
+/* Conversion progress sweeps across the whole task card, left to right. */
+.task-card {
+  position: relative;
+  overflow: hidden;
+}
+
+.task-card::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--task-progress, 0%);
+  background: linear-gradient(
+    90deg,
+    rgba(26, 86, 219, 0.08),
+    rgba(26, 86, 219, 0.18)
+  );
+  transition: width 0.6s ease-out;
+  pointer-events: none;
+}
+
+.task-card .card-head {
+  position: relative;
+  z-index: 1;
+}
+
+.card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .model-name {
+  flex: 1 1 auto;
   min-width: 0;
-  font-size: 13px;
-  font-weight: bold;
-  margin-bottom: 5px;
+  font-size: 12.5px;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.model-actions,
-.input-row,
-.coordinate-row,
-.preset-row {
+.mini-button {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--sb-fg);
+  background: var(--sb-input-bg);
+  border: 1px solid var(--sb-input-border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.mini-button:hover {
+  background: var(--sb-hover);
+}
+
+.mini-button.danger {
+  color: var(--sb-danger);
+  border-color: var(--sb-danger-border);
+}
+
+.mini-button.danger:hover {
+  background: var(--sb-danger-soft);
+}
+
+.card-body {
   display: flex;
-  gap: 5px;
-  margin-bottom: 6px;
   flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
 }
 
-.model-actions button,
-.preset-row button {
-  padding: 4px 8px;
-  font-size: 12px;
-  background: #2196f3;
-  color: white;
-  border: none;
-  border-radius: 3px;
-  cursor: pointer;
-}
-
-.model-actions button.danger,
-.task-card button.danger {
-  background: #f44336;
-}
-
-.coordinate-row input {
-  flex: 1;
-  padding: 4px 5px;
-  font-size: 12px;
-  border: 1px solid #ddd;
-  border-radius: 3px;
-}
-
-.update-button {
-  width: 100%;
-  padding: 4px 8px;
-  font-size: 12px;
-  background: #ff9800;
-  color: white;
-  border: none;
-  border-radius: 3px;
-  cursor: pointer;
-}
-
-.task-row {
+.field-group {
   display: flex;
   align-items: center;
-  gap: 8px;
-}
-
-.task-name,
-.task-status {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.task-name {
+  gap: 4px;
   min-width: 0;
+}
+
+.field-group.coords {
   flex: 1 1 auto;
 }
 
-.task-status {
-  flex: 0 0 auto;
+.field-group.transform {
+  flex: 1 1 100%;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
 }
 
-.task-row .danger {
-  flex: 0 0 auto;
-}
-
-.error {
-  color: #f44336;
-  font-size: 12px;
-  margin: 6px 0 0 0;
-}
-
-.message {
-  color: #666;
-  font-size: 12px;
-  margin: 6px 0 0 0;
-}
-
-.diagnostic {
-  color: #666;
-  font-size: 11px;
-  margin: 0 0 6px 0;
-  word-break: break-all;
-}
-
-.transform-panel {
-  margin-top: 10px;
-  padding: 10px;
-  background: #fafafa;
+.field {
+  padding: 3px 6px;
+  font-family: inherit;
+  font-size: 11.5px;
+  color: var(--sb-fg);
+  background: var(--sb-input-bg);
+  border: 1px solid var(--sb-input-border);
   border-radius: 4px;
-  border: 1px solid #e0e0e0;
 }
 
-.transform-title {
+.field::placeholder {
+  color: var(--sb-placeholder);
+}
+
+.field:focus {
+  outline: none;
+  border-color: var(--sb-accent-border);
+  box-shadow: 0 0 0 2px var(--sb-focus-ring);
+}
+
+.field.coord {
+  flex: 1 1 74px;
+  min-width: 0;
+}
+
+.field.num {
+  width: 52px;
+  text-align: right;
+}
+
+.field-label {
+  flex: 0 0 auto;
+  font-size: 11.5px;
+  color: var(--sb-muted);
+}
+
+.transform-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
-  font-size: 13px;
+  gap: 6px;
 }
 
-.selected-model-name {
+.transform-row .field-label {
+  flex: 0 0 28px;
+}
+
+.slider {
+  -webkit-appearance: none;
+  appearance: none;
+  flex: 1 1 auto;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  height: 16px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 2px;
+  background: linear-gradient(
+    to right,
+    var(--sb-slider) 0 var(--slider-fill, 0%),
+    var(--sb-slider-track) var(--slider-fill, 0%) 100%
+  );
+}
+
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 50%;
+  background: var(--sb-bg);
+  border: 2px solid var(--sb-slider);
+  box-shadow: 0 1px 2px var(--sb-slider-shadow);
+}
+
+.slider::-moz-range-track {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--sb-slider-track);
+}
+
+.slider::-moz-range-progress {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--sb-slider);
+}
+
+.slider::-moz-range-thumb {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--sb-bg);
+  border: 2px solid var(--sb-slider);
+}
+
+.task-status {
+  flex: 0 0 auto;
+  font-size: 11.5px;
   white-space: nowrap;
 }
 
-.input-row input {
-  flex: 1;
-  padding: 6px 8px;
-  border: 1px solid #ddd;
-  border-radius: 4px;
-  font-size: 13px;
-}
-
-.input-row button {
-  padding: 6px 10px;
-  background: #2196f3;
-  color: white;
-  border: none;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.range {
-  width: 100%;
-  margin-bottom: 8px;
-}
-
-.preset-row button {
-  background: #90caf9;
-}
-
-.rotation-section {
-  margin-top: 16px;
-  padding-top: 12px;
-  border-top: 1px solid #ddd;
-}
-
-.rotation-section h5 {
-  margin: 0 0 8px 0;
-  font-size: 14px;
-}
-
-.component-tree-wrap {
-  position: absolute;
-  left: 320px;
-  top: 20px;
-  z-index: 1050;
-}
 </style>

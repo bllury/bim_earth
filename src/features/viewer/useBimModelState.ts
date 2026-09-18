@@ -30,8 +30,9 @@ export const useBimModelState = () => {
   const ifcModels = shallowRef<LoadedIfcModelState[]>([])
   const selectedModelId = ref<string | null>(null)
   const coordinateInputs = ref<Record<string, { longitude: string; latitude: string }>>({})
-  const scaleDrafts = ref<Record<string, string>>({})
-  const rotationDrafts = ref<Record<string, string>>({})
+  // `v-model` on <input type="number"> stores numbers, so drafts hold both.
+  const scaleDrafts = ref<Record<string, string | number>>({})
+  const rotationDrafts = ref<Record<string, string | number>>({})
 
   /** Resolves the currently selected GLB or IFC model. */
   const selectedModel = computed<

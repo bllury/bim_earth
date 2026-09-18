@@ -4,11 +4,13 @@ import {
   uploadIfcFile,
 } from '../../services/ifcApi'
 import type { IfcConversionStatus } from '../../types/bim'
+import { logError, logInfo } from '../console/appConsole'
 
 export interface IfcConversionTask {
   taskId: string
   fileName: string
   status: IfcConversionStatus
+  progress?: number
   message?: string
   error?: string
 }
@@ -84,12 +86,14 @@ export const useIfcConversion = (
       if (result.status === 'completed') {
         stop(taskId)
         updateTask(taskId, { status: 'completed', message: result.message })
+        logInfo(`IFC 转换完成：${fileName}`, result.message)
 
         if (!result.tilesetUrl) {
           updateTask(taskId, {
             status: 'failed',
             error: '转换服务未返回 tilesetUrl',
           })
+          logError(`IFC 转换结果缺少 tilesetUrl：${fileName}`)
           return
         }
 
@@ -110,14 +114,20 @@ export const useIfcConversion = (
 
       if (result.status === 'failed') {
         stop(taskId)
+        const failure = result.error ?? result.message ?? 'IFC 转换失败'
         updateTask(taskId, {
           status: 'failed',
-          error: result.error ?? result.message ?? 'IFC 转换失败',
+          error: failure,
         })
+        logError(`IFC 转换失败：${fileName}`, failure)
         return
       }
 
-      updateTask(taskId, { status: result.status, message: result.message })
+      updateTask(taskId, {
+        status: result.status,
+        message: result.message,
+        progress: result.progress,
+      })
       pollingTasks.delete(taskId)
       pollingTimers.set(
         taskId,
@@ -128,10 +138,13 @@ export const useIfcConversion = (
     } catch (error) {
       if (terminalTasks.has(taskId)) return
       stop(taskId)
+      const failure =
+        error instanceof Error ? error.message : '查询转换状态失败'
       updateTask(taskId, {
         status: 'failed',
-        error: error instanceof Error ? error.message : '查询转换状态失败',
+        error: failure,
       })
+      logError(`IFC 转换状态查询失败：${fileName}`, error)
     }
   }
 
@@ -181,6 +194,7 @@ export const useIfcConversion = (
           error: error instanceof Error ? error.message : 'IFC 上传失败',
         },
       ]
+      logError(`IFC 上传失败：${file.name}`, error)
     }
   }
 

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
+import os
 from pathlib import Path
+from typing import Callable, Optional
 
 from .gltf_utils import (
     build_batched_b3dm,
@@ -9,7 +12,82 @@ from .gltf_utils import (
     box_from_vertices,
     write_json,
 )
-from .ifc_converter import ConvertResult, IfcConverterError
+from .ifc_converter import ConvertResult, IfcConverterError, ProgressCallback
+
+
+# Models smaller than this convert faster serially than they pay for a thread pool.
+SMALL_MODEL_ELEMENT_LIMIT = 200
+# Above ~8 threads the geometry kernel saturates memory bandwidth (measured).
+DEFAULT_MAX_GEOMETRY_THREADS = 8
+
+
+def _container_cpu_quota() -> Optional[int]:
+    """Reads a container CPU quota from cgroup v2/v1 when one is present."""
+    try:
+        cpu_max = Path("/sys/fs/cgroup/cpu.max")
+        if cpu_max.exists():
+            parts = cpu_max.read_text(encoding="utf-8").split()
+            if len(parts) >= 2 and parts[0] != "max":
+                quota, period = int(parts[0]), int(parts[1])
+                if quota > 0 and period > 0:
+                    return max(1, math.ceil(quota / period))
+    except (OSError, ValueError):
+        pass
+
+    try:
+        quota_path = Path("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+        period_path = Path("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+        if quota_path.exists() and period_path.exists():
+            quota = int(quota_path.read_text(encoding="utf-8").strip())
+            period = int(period_path.read_text(encoding="utf-8").strip())
+            if quota > 0 and period > 0:
+                return max(1, math.ceil(quota / period))
+    except (OSError, ValueError):
+        pass
+
+    return None
+
+
+def available_cpu_count() -> int:
+    """Counts usable CPUs, honoring CPU affinity and container CPU quotas."""
+    try:
+        cores = len(os.sched_getaffinity(0))  # Linux only
+    except (AttributeError, OSError):
+        cores = os.cpu_count() or 1
+
+    quota = _container_cpu_quota()
+    if quota is not None:
+        cores = min(cores, quota)
+
+    return max(1, cores)
+
+
+def resolve_geometry_threads(element_count: int) -> int:
+    """Picks the triangulation thread count for this machine and model size.
+
+    Priority: IFC_CONVERT_THREADS override > container/affinity core count,
+    capped by IFC_CONVERT_MAX_THREADS (default 8).
+    """
+    override = os.getenv("IFC_CONVERT_THREADS", "").strip()
+    if override:
+        try:
+            threads = int(override)
+        except ValueError:
+            threads = 0
+        if threads >= 1:
+            return threads
+
+    if element_count < SMALL_MODEL_ELEMENT_LIMIT:
+        return 1
+
+    try:
+        max_threads = int(
+            os.getenv("IFC_CONVERT_MAX_THREADS", str(DEFAULT_MAX_GEOMETRY_THREADS))
+        )
+    except ValueError:
+        max_threads = DEFAULT_MAX_GEOMETRY_THREADS
+
+    return max(1, min(available_cpu_count(), max(1, max_threads)))
 
 
 def _as_string(value: object) -> str:
@@ -26,6 +104,7 @@ class IfcOpenShellConverter:
         ifc_path: Path,
         output_dir: Path,
         model_id: str,
+        on_progress: Optional[ProgressCallback] = None,
     ) -> ConvertResult:
         try:
             import ifcopenshell
@@ -56,39 +135,53 @@ class IfcOpenShellConverter:
         geometry_settings = ifcopenshell_geom.settings()
         geometry_settings.set(geometry_settings.USE_WORLD_COORDS, True)
 
+        # Progress is weighted: geometry dominates the runtime (~90%), the
+        # 3D Tiles packaging of the remaining elements is comparatively fast.
+        last_reported = [-1.0]
+
+        def emit(percent: float, message: str) -> None:
+            if on_progress is None:
+                return
+            value = min(max(percent, 0.0), 100.0)
+            if value - last_reported[0] < 1.0 and value < 100.0:
+                return
+            last_reported[0] = value
+            on_progress(value, message)
+
+        emit(1.0, "正在解析 IFC 模型")
+
+        thread_count = resolve_geometry_threads(len(elements))
         shape_records: list[tuple[object, list[float], list[int]]] = []
         global_minimum = [float("inf"), float("inf"), float("inf")]
         global_maximum = [float("-inf"), float("-inf"), float("-inf")]
 
-        for element in elements:
-            try:
-                shape = ifcopenshell_geom.create_shape(geometry_settings, element)
-                if shape is None or shape.geometry is None:
-                    continue
+        for element, vertices, faces in self._extract_shapes(
+            model,
+            elements,
+            geometry_settings,
+            thread_count,
+            on_progress=lambda fraction: emit(
+                2.0 + fraction * 88.0,
+                f"正在三角化构件 {int(fraction * len(elements))}/{len(elements)}",
+            ),
+        ):
+            for index in range(0, len(vertices), 3):
+                x = vertices[index]
+                y = vertices[index + 1]
+                z = vertices[index + 2]
+                global_minimum[0] = min(global_minimum[0], x)
+                global_minimum[1] = min(global_minimum[1], y)
+                global_minimum[2] = min(global_minimum[2], z)
+                global_maximum[0] = max(global_maximum[0], x)
+                global_maximum[1] = max(global_maximum[1], y)
+                global_maximum[2] = max(global_maximum[2], z)
 
-                vertices = list(shape.geometry.verts)
-                faces = list(shape.geometry.faces)
-
-                if not vertices or not faces:
-                    continue
-
-                for index in range(0, len(vertices), 3):
-                    x = vertices[index]
-                    y = vertices[index + 1]
-                    z = vertices[index + 2]
-                    global_minimum[0] = min(global_minimum[0], x)
-                    global_minimum[1] = min(global_minimum[1], y)
-                    global_minimum[2] = min(global_minimum[2], z)
-                    global_maximum[0] = max(global_maximum[0], x)
-                    global_maximum[1] = max(global_maximum[1], y)
-                    global_maximum[2] = max(global_maximum[2], z)
-
-                shape_records.append((element, vertices, faces))
-            except Exception:  # noqa: BLE001 - skip a broken element but keep converting others
-                continue
+            shape_records.append((element, vertices, faces))
 
         if not shape_records:
             raise IfcConverterError("IFC 构件没有生成可用的 3D Tiles 内容")
+
+        emit(90.0, f"正在生成 3D Tiles（{len(shape_records)} 个构件）")
 
         all_vertices: list[float] = []
         all_triangles: list[tuple[int, int, int]] = []
@@ -121,7 +214,12 @@ class IfcOpenShellConverter:
             metadata_records.append(
                 self._build_metadata_record(element, feature_id, geometry)
             )
+            emit(
+                90.0 + ((feature_id + 1) / len(shape_records)) * 8.0,
+                f"正在写入构件数据 {feature_id + 1}/{len(shape_records)}",
+            )
 
+        emit(98.0, "正在打包 3D Tiles 资源")
         glb_bytes = build_glb_from_triangles_with_batch_ids(
             all_vertices,
             all_triangles,
@@ -166,13 +264,89 @@ class IfcOpenShellConverter:
 
         write_json(output_dir / "tileset.json", tileset)
         write_json(output_dir / "metadata.json", metadata)
+        emit(100.0, "转换完成")
 
         return ConvertResult(
             model_id=model_id,
             tileset_url=f"/api/ifc/revisions/{model_id}/tiles/tileset.json",
             metadata_url=f"/api/ifc/revisions/{model_id}/metadata.json",
-            message=f"已转换 {len(metadata_features)} 个 IFC 构件",
+            message=(
+                f"已转换 {len(metadata_features)} 个 IFC 构件 · {thread_count} 线程"
+            ),
         )
+
+    def _extract_shapes(
+        self,
+        model: object,
+        elements: list[object],
+        geometry_settings: object,
+        thread_count: int,
+        on_progress: Optional[Callable[[float], None]] = None,
+    ) -> list[tuple[object, list[float], list[int]]]:
+        """Triangulates every IfcElement, in parallel when the machine allows it.
+
+        The geometry iterator walks every product that carries geometry (it also
+        yields IfcSpace and similar spatial elements), so results are filtered
+        back to the IfcElement set and re-sorted into file order. That keeps
+        batch ids and metadata ordering identical to the serial implementation.
+        """
+        import ifcopenshell.geom as ifcopenshell_geom
+
+        order = {element.id(): index for index, element in enumerate(elements)}
+        allowed = set(order)
+        total = max(1, len(elements))
+        matched = 0
+        reported = -1.0
+
+        def collect(threads: int) -> list[tuple[object, list[float], list[int]]]:
+            nonlocal matched, reported
+            matched = 0
+            reported = -1.0
+            shapes: list[tuple[object, list[float], list[int]]] = []
+            iterator = ifcopenshell_geom.iterator(
+                geometry_settings, model, threads
+            )
+            if not iterator.initialize():
+                return shapes
+
+            while True:
+                try:
+                    shape = iterator.get()
+                    # `shape.product` returns an unusable proxy (attributes such
+                    # as GlobalId/Name read back empty), so always resolve the
+                    # element through the model we opened ourselves.
+                    element = model.by_id(shape.id)
+                    if element is not None and element.id() in allowed:
+                        geometry = shape.geometry
+                        if geometry is not None:
+                            vertices = list(geometry.verts)
+                            faces = list(geometry.faces)
+                            if vertices and faces:
+                                shapes.append((element, vertices, faces))
+                                matched += 1
+                                if on_progress is not None:
+                                    fraction = min(matched / total, 1.0)
+                                    if fraction - reported >= 0.01 or fraction >= 1.0:
+                                        reported = fraction
+                                        on_progress(fraction)
+                except Exception:  # noqa: BLE001 - skip a broken element, keep going
+                    pass
+
+                if not iterator.next():
+                    break
+
+            return shapes
+
+        try:
+            shapes = collect(thread_count)
+        except Exception:  # noqa: BLE001 - fall back to the serial path below
+            shapes = []
+
+        if thread_count > 1 and not shapes:
+            shapes = collect(1)
+
+        shapes.sort(key=lambda item: order.get(item[0].id(), 0))
+        return shapes
 
     def _build_batch_table(self, element: object, feature_id: int) -> dict:
         ifc_guid = getattr(element, "GlobalId", None)

@@ -79,6 +79,21 @@
 
 相机 JSON 包含 `position`、`direction` 和 `up` 三个笛卡尔向量。页面恢复时使用 `Camera.setView()`，不保存 Cesium 对象本身。
 
+### element_business
+
+按构件保存运维字段（安装日期、保质期、巡检周期、维护状态、责任单位、备注等）：
+
+- `model_id`
+- `element_guid`
+- `business_json`
+- `updated_at`
+
+`model_id + element_guid` 为主键，写入走 upsert。字段集合不固定，整体以 JSON 文本存储，新增运维字段不需要改表结构；删除模型版本时该版本的记录一并删除。
+
+构件属性接口 `GET /api/ifc/models/{modelId}/elements/{ifcGuid}/properties` 会优先返回这里存储的运维字段，未存储过时回落到 metadata.json 中的空 `business`。
+
+前端写入策略：浏览器 localStorage 仍然即时写入，同时通过 `PUT .../business` 同步到后端；后端写入失败只记录警告，不阻塞交互。
+
 ## 3. 文件生命周期
 
 上传时：

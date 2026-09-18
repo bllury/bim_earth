@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import * as Cesium from 'cesium'
 import 'cesium/Build/Cesium/Widgets/widgets.css'
 import { pickIfcFeatures } from '../lib/ifcPicking'
@@ -8,6 +8,12 @@ import {
   hiddenElementKeys,
   ifcTilesetModelIds,
 } from '../features/viewer/selectionState'
+import {
+  CONSOLE_HANDLE_HEIGHT,
+  CONSOLE_HEIGHT,
+  TREE_WIDTH,
+  useLayoutState,
+} from '../features/layout/useLayoutState'
 
 const props = defineProps<{
   selectedPosition: Cesium.Cartesian3 | null
@@ -23,6 +29,19 @@ const container = ref<HTMLDivElement | null>(null)
 const viewer = shallowRef<Cesium.Viewer | null>(null)
 const markerEntity = shallowRef<Cesium.Entity | null>(null)
 const clickHandler = shallowRef<Cesium.ScreenSpaceEventHandler | null>(null)
+
+const { consoleOpen, treePanelOpen } = useLayoutState()
+
+/** Keeps Cesium's own toolbar clear of the right-side component-tree panel. */
+const toolbarRight = computed(
+  () => `${(treePanelOpen.value ? TREE_WIDTH : 0) + 16}px`,
+)
+
+/** Keeps Cesium's fullscreen button above the bottom console panel. */
+const cesiumBottomInset = computed(
+  () =>
+    `${(consoleOpen.value ? CONSOLE_HEIGHT : CONSOLE_HANDLE_HEIGHT) + 8}px`,
+)
 
 /** Recreates the coordinate marker and label at the selected world position. */
 const updateMarker = () => {
@@ -44,8 +63,8 @@ const updateMarker = () => {
     id: 'placement-marker',
     position: props.selectedPosition,
     point: {
-      pixelSize: 16,
-      color: Cesium.Color.fromCssColorString('#ff3b30'),
+      pixelSize: 10,
+      color: Cesium.Color.fromCssColorString('#123c94'),
       heightReference: Cesium.HeightReference.CLAMP_TO_GROUND,
       disableDepthTestDistance: Number.POSITIVE_INFINITY,
     },
@@ -83,7 +102,9 @@ onMounted(() => {
     baseLayerPicker: false,
     fullscreenButton: true,
     geocoder: false,
-    homeButton: true,
+    // The home/reset-view button is intentionally disabled: the shared
+    // placement workflow owns the camera. Flip this flag to bring it back.
+    homeButton: false,
     infoBox: false,
     sceneModePicker: false,
     selectionIndicator: false,
@@ -163,7 +184,14 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="container" class="earth-viewer" />
+  <div
+    ref="container"
+    class="earth-viewer"
+    :style="{
+      '--cesium-toolbar-right': toolbarRight,
+      '--cesium-bottom-inset': cesiumBottomInset,
+    }"
+  />
 </template>
 
 <style scoped>
@@ -171,5 +199,13 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 100vh;
   position: relative;
+}
+
+.earth-viewer :deep(.cesium-viewer-toolbar) {
+  right: var(--cesium-toolbar-right, 16px);
+}
+
+.earth-viewer :deep(.cesium-viewer-fullscreenContainer) {
+  bottom: var(--cesium-bottom-inset, 0px);
 }
 </style>

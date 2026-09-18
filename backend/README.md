@@ -22,14 +22,8 @@ py -3 -m venv .venv
 
 python -m pip install --upgrade pip
 
-# 先安装核心依赖，用于启动服务和 mock 验证
-pip install -r requirements-core.txt
-```
-
-如果要使用真实 IfcOpenShell 转换，再安装：
-
-```bash
-pip install ifcopenshell
+# 安装包含 IfcOpenShell 的完整依赖
+pip install -r requirements.txt
 ```
 
 ## 启动
@@ -37,33 +31,34 @@ pip install ifcopenshell
 Windows PowerShell 使用 `$env:` 设置环境变量：
 
 ```bash
-$env:IFC_CONVERTER_MODE = "mock"
+$env:IFC_CONVERTER_MODE = "ifcopenshell"
 uvicorn app.main:app --reload --port 8000
 ```
 
 ## 转换模式
 
-### 真实 IFC 转换
+服务默认使用 IfcOpenShell 做真实 IFC 转换，依赖已包含在 `requirements.txt` 中。
+如果未安装 `ifcopenshell`，转换任务会返回明确的失败状态，不会伪造成功。
 
-默认使用 IfcOpenShell：
+`requirements-core.txt` 只包含 FastAPI、uvicorn 等运行依赖，供离线自测使用：
+把 `IFC_CONVERTER_MODE` 设为 `mock` 时会生成一个测试立方体，仅验证 API 和
+3D Tiles 加载链路，不代表真实 IFC 几何。
+
+### 几何并发与线程数
+
+几何三角化默认按机器能力自动选择线程数：优先读容器 CPU 配额（cgroup v2/v1），
+再退到 CPU 亲和与 `os.cpu_count()`，上限默认 8（超过约 8 线程收益反转）。
+构件数少于 200 的小模型直接单线程，省掉线程池开销。
+
+可用环境变量覆盖：
 
 ```bash
-$env:IFC_CONVERTER_MODE = "ifcopenshell"
-uvicorn app.main:app --reload --port 8000
+$env:IFC_CONVERT_THREADS = "4"       # 强制线程数（优先级最高）
+$env:IFC_CONVERT_MAX_THREADS = "12"  # 调整自适应上限
 ```
 
-要求已安装 `ifcopenshell`。如果未安装，服务会返回明确的失败状态，不会伪造成功。
-
-### 本地 mock 转换
-
-用于在没有 IfcOpenShell 的环境中验证 3D Tiles 加载链路：
-
-```bash
-$env:IFC_CONVERTER_MODE = "mock"
-uvicorn app.main:app --reload --port 8000
-```
-
-Mock 模式会生成一个用于测试的 3D Tiles 立方体，不代表真实 IFC 几何。
+实测（本机 i9-13900HX、6.1MB / 1111 构件模型）：1 线程 45.9s → 8 线程 15.2s，
+约 3.0× 提速；构件集合、顺序（guid 序列）与输出体积完全一致，峰值内存 317MB → 343MB。
 
 ## 接口摘要
 
@@ -72,6 +67,9 @@ POST /api/ifc/convert
 GET  /api/ifc/convert/{taskId}
 GET  /api/ifc/recent
 PUT  /api/ifc/projects/{projectId}/camera
+GET  /api/ifc/models/{modelId}/elements/{ifcGuid}/properties
+GET  /api/ifc/models/{modelId}/elements/{ifcGuid}/business
+PUT  /api/ifc/models/{modelId}/elements/{ifcGuid}/business
 GET  /api/ifc/revisions/{revisionId}/metadata.json
 GET  /api/ifc/revisions/{revisionId}/tiles/{asset}
 ```
@@ -98,4 +96,4 @@ data/
   temp/
 ```
 
-`bim.sqlite3` 保存项目、版本、转换状态、路径、模型位置和相机 JSON；大文件不进入数据库。上述目录属于运行时产物，不应提交到版本库。
+`bim.sqlite3` 保存项目、版本、转换状态、路径、模型位置、相机 JSON 和构件运维字段；大文件不进入数据库。构件运维字段按 `modelId + ifcGuid` 存于 `element_business` 表，删除模型版本时一并清理。上述目录属于运行时产物，不应提交到版本库。
